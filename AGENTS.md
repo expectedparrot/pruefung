@@ -5,19 +5,16 @@ and grading quizzes and exams. Use the CLI and the files under `.pruefung/` as
 the workflow source of truth. Commands emit one JSON envelope by default; use
 `--human` only when a professor needs a terminal rendering.
 
-Start by inspecting the available schemas and current bank state:
+Use the CLI itself as the state-aware source of truth:
 
 ```bash
-pruefung schema question
-pruefung schema concept
-pruefung concepts
-pruefung ls
-pruefung exam list
-pruefung inference
+pruefung agent next
 ```
 
-Use `pruefung <command> --help` for the installed interface rather than
-guessing arguments from examples. Keep stable question IDs and EDSL
+Run `pruefung agent next` after each completed stage and follow the returned
+action. Use `pruefung <command> --help` for the installed interface rather than
+guessing arguments from examples. Consult `pruefung schema <object>` when the
+next action requires structured input. Keep stable question IDs and EDSL
 `question_name` values intact. Prefer CLI mutations; if a question file is
 edited directly, immediately run `pruefung validate` and report every question
 whose content hash changed or whose QC status returned to `draft`.

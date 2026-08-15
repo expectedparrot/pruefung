@@ -17,6 +17,22 @@ def test_checkbox_partial_credit():
     assert score_checkbox([0, 2], [0, 2], 4, "none") == 4
 
 
+def test_agent_next_starts_with_setup_then_concepts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    before = runner.invoke(cli, ["agent", "next"])
+    assert before.exit_code == 0
+    payload = json.loads(before.output)
+    assert payload["data"]["phase"] == "setup"
+    assert payload["data"]["action"]["commands"] == ['pruefung init --course "<course name>"']
+
+    runner.invoke(cli, ["init", "--course", "STAT 101"])
+    after = runner.invoke(cli, ["agent", "next"])
+    payload = json.loads(after.output)
+    assert payload["data"]["phase"] == "concepts"
+    assert payload["data"]["action"]["commands"][0] == "pruefung schema concept"
+
+
 def test_basic_question_and_exam(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()

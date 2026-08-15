@@ -9,13 +9,8 @@
 [Read the illustrated tutorial](https://expectedparrot.github.io/pruefung/) · [View the specification](pruefung-spec.md)
 
 ```bash
-python -m pip install -e .
-pruefung init --course "STAT 101"
-pruefung concepts add confidence_intervals
-pruefung question add --type mcq --name ci_interpretation --text "Which is correct?" \
-  --option A --option B --option C --option D --answer 2 --points 2 \
-  --concept confidence_intervals
-pruefung validate
+uv tool install git+https://github.com/expectedparrot/pruefung.git
+pruefung agent next
 ```
 
-See [pruefung-spec.md](pruefung-spec.md) for the complete workflow and data contract.
+`agent next` inspects the current workspace and returns the next safe action as JSON.

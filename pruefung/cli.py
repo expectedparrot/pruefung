@@ -77,6 +77,141 @@ def cli(ctx: click.Context, human: bool) -> None:
     ctx.obj.human = human
 
 
+@cli.group("agent")
+def agent_group() -> None:
+    """State-aware guidance for coding agents."""
+
+
+def next_action(root: Path) -> tuple[str, dict[str, Any]]:
+    concepts = [read_json(path) for path in concept_files(root)]
+    questions = [read_json(path) for path in question_files(root)]
+    task_directories = sorted(path for path in (state(root) / "inference").iterdir() if path.is_dir())
+    tasks = [read_json(path / "task.json") for path in task_directories]
+    tasks = [task for task in tasks if task]
+    exams = [read_json(path) for path in sorted((state(root) / "exams").glob("*/exam.json"))]
+
+    if not concepts:
+        return "concepts", {
+            "kind": "authoring",
+            "reason": "The course has no concepts yet.",
+            "commands": ["pruefung schema concept", "pruefung concepts add <concept-id>"],
+        }
+    if not questions:
+        return "item_bank", {
+            "kind": "authoring",
+            "reason": "Concepts exist, but the item bank is empty.",
+            "commands": ["pruefung schema question", "pruefung question add --help"],
+        }
+
+    pending = [task for task in tasks if task.get("status") == "pending"]
+    if pending:
+        task = pending[-1]
+        result_path = state(root) / "inference" / task["task_id"] / "result.json"
+        if result_path.exists():
+            ingest = (
+                f"pruefung qc ingest {task['task_id']}"
+                if task["kind"] == "qc"
+                else f"pruefung concepts import {result_path} --review"
+            )
+            return "inference_ingest", {
+                "kind": "review",
+                "reason": f"Task {task['task_id']} has a result ready for hash-guarded ingestion.",
+                "commands": [ingest],
+            }
+        return "inference_run", {
+            "kind": "external_execution",
+            "reason": f"Task {task['task_id']} is pending and has not produced a result.",
+            "requires_approval": True,
+            "commands": [f"python .pruefung/inference/{task['task_id']}/run.py"],
+        }
+
+    drafts = [question["meta"]["id"] for question in questions if question["meta"]["status"] == "draft"]
+    if drafts:
+        return "quality_control", {
+            "kind": "validation",
+            "reason": f"{len(drafts)} question(s) are drafts and need validation and QC.",
+            "question_ids": drafts,
+            "commands": ["pruefung validate", "pruefung qc make"],
+        }
+    failed = [question["meta"]["id"] for question in questions if question["meta"]["status"] == "qc_failed"]
+    if failed:
+        return "revise_questions", {
+            "kind": "review",
+            "reason": f"{len(failed)} question(s) failed QC and require an author decision.",
+            "question_ids": failed,
+            "commands": [f"pruefung show {failed[0]} -H", f"pruefung question add --id {failed[0]} --help"],
+        }
+    if not exams:
+        return "exam_build", {
+            "kind": "authoring",
+            "reason": "The checked item bank is ready, but no exam exists.",
+            "commands": ["pruefung exam create <exam-id> --title <title>"],
+        }
+
+    building = [exam for exam in exams if exam["state"] == "building"]
+    if building:
+        exam = building[-1]
+        exam_id = exam["exam_id"]
+        if not exam.get("members"):
+            return "exam_membership", {
+                "kind": "authoring",
+                "reason": f"Exam {exam_id} has no questions.",
+                "commands": ["pruefung ls --status qc_passed", f"pruefung exam add {exam_id} <qid> [<qid> ...]"],
+            }
+        if not exam.get("roster"):
+            return "exam_roster", {
+                "kind": "organizer_input",
+                "reason": f"Exam {exam_id} needs a roster before deployment.",
+                "commands": [f"pruefung exam stats {exam_id} -H", f"pruefung exam roster {exam_id} <roster.csv>"],
+            }
+        return "exam_deploy", {
+            "kind": "external_mutation",
+            "reason": f"Exam {exam_id} has questions and a roster; preview and approve the frozen deployment.",
+            "requires_approval": True,
+            "commands": [
+                f"pruefung exam stats {exam_id} -H",
+                f"pruefung exam preview {exam_id} --web",
+                f"pruefung exam deploy {exam_id} --dry-run",
+                f"pruefung exam deploy {exam_id}",
+            ],
+        }
+
+    exam = exams[-1]
+    return "responses_and_grading", {
+        "kind": "monitoring",
+        "reason": f"Exam {exam['exam_id']} is deployed.",
+        "commands": [f"pruefung status {exam['exam_id']}", f"pruefung grade {exam['exam_id']}"],
+    }
+
+
+@agent_group.command("next")
+@human_option
+@click.pass_context
+def agent_next(ctx: click.Context, human: bool) -> None:
+    """Inspect project state and return the next safe action."""
+    ctx.find_root().obj.human |= human
+    ctx.meta["command"] = "agent next"
+    try:
+        root = find_root()
+    except PruefungError:
+        emit(
+            ctx,
+            {
+                "phase": "setup",
+                "project": None,
+                "action": {
+                    "kind": "organizer_input",
+                    "reason": "No pruefung project was found from the current directory.",
+                    "commands": ['pruefung init --course "<course name>"'],
+                },
+            },
+        )
+        return
+    phase, action = next_action(root)
+    config = read_json(state(root) / "config.json", {})
+    emit(ctx, {"phase": phase, "project": {"root": str(root), "course": config.get("course")}, "action": action})
+
+
 @cli.command("init")
 @click.option("--course", required=True)
 @human_option
