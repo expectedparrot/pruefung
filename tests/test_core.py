@@ -37,6 +37,13 @@ def test_agent_next_starts_with_setup_then_concepts(tmp_path, monkeypatch):
     assert payload["data"]["action"]["commands"][0].startswith("pruefung source add")
 
 
+def test_agent_guide_keeps_internals_out_of_professor_messages():
+    guide = (Path(__file__).parents[1] / "AGENTS.md").read_text()
+    assert "Pruefung is an implementation detail" in guide
+    assert "not “The QC panel is ready.”" in guide
+    assert "Never\ncopy the `reason` or `commands` fields" in guide
+
+
 def test_basic_question_and_exam(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()

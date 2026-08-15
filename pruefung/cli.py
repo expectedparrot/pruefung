@@ -136,6 +136,7 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "reason": f"All {len(questions)} questions are {only_type}. Ask the professor whether they want a mix of question types before QC.",
             "type_mix": dict(mix),
             "question": "Keep this all-one-type bank, or revise it to include other formats such as true/false, checkbox, or free text?",
+            "user_message": f"All {len(questions)} questions currently use the same format. Would you like to keep that, or include a mix of question types?",
             "commands": [
                 'pruefung question mix approve --decision keep --note "<professor rationale>"',
                 "pruefung question add --help",
@@ -155,12 +156,14 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
                 ingest = f"pruefung concepts import {result_path} --review"
             return "inference_ingest", {
                 "kind": "review",
-                "reason": f"Task {task['task_id']} has a result ready for hash-guarded ingestion.",
+                "reason": f"Completed model-assisted work is ready to apply ({task['task_id']}).",
+                "user_message": "The independent review is complete. I’m checking the findings against the current questions now.",
                 "commands": [ingest],
             }
         return "inference_run", {
             "kind": "external_execution",
-            "reason": f"Task {task['task_id']} is pending and has not produced a result.",
+            "reason": f"The prepared model-assisted work is awaiting execution ({task['task_id']}).",
+            "user_message": "I’ve prepared the independent review. May I run it now? It uses paid model calls.",
             "requires_approval": True,
             "commands": [f"python .pruefung/inference/{task['task_id']}/run.py"],
         }
@@ -169,7 +172,8 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
     if drafts:
         return "quality_control", {
             "kind": "validation",
-            "reason": f"{len(drafts)} question(s) are drafts and need validation and QC.",
+            "reason": f"{len(drafts)} question(s) need an independent check before use.",
+            "user_message": "The questions are drafted. May I have independent reviewers check them for ambiguity and answer-key problems?",
             "question_ids": drafts,
             "commands": ["pruefung validate", "pruefung qc make"],
         }
@@ -185,7 +189,8 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
         )
         return "revise_questions", {
             "kind": "review",
-            "reason": f"{len(failed)} question(s) failed QC and require an author decision.",
+            "reason": f"Independent reviewers raised concerns about {len(failed)} question(s).",
+            "user_message": f"The reviewers raised concerns about {len(failed)} question(s). I’ll summarize each concern so you can revise the wording or keep it as written.",
             "question_ids": failed,
             "commands": [
                 *([f"pruefung qc report {qc_task} -H"] if qc_task else []),
@@ -215,6 +220,7 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             return "exam_roster", {
                 "kind": "organizer_input",
                 "reason": f"Choose whether exam {exam_id} should use a roster or one shared open link.",
+                "user_message": "Should students receive individual invitations, or should everyone use one shared link?",
                 "commands": [
                     f"pruefung exam stats {exam_id} -H",
                     f"pruefung exam roster {exam_id} <roster.csv>",
@@ -225,6 +231,7 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "kind": "external_mutation",
             "reason": f"Exam {exam_id} has questions and a roster; preview and approve the frozen deployment.",
             "requires_approval": True,
+            "user_message": "The exam is ready for a final preview. After you approve it, I can publish it for students.",
             "commands": [
                 f"pruefung exam stats {exam_id} -H",
                 f"pruefung exam preview {exam_id} --web",
@@ -240,6 +247,7 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
         return "responses_and_grading", {
             "kind": "monitoring",
             "reason": f"Exam {exam_id} is deployed and has not been graded yet.",
+            "user_message": "I’ll check for new submissions and update the grades.",
             "commands": [f"pruefung status {exam_id}", f"pruefung grade {exam_id}"],
         }
     unresolved = [
@@ -253,12 +261,14 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "kind": "external_execution",
             "reason": f"{len(unresolved)} free-text answer(s) require rubric scoring or professor review.",
             "requires_approval": True,
+            "user_message": f"{len(unresolved)} written response(s) still need rubric-based scoring. May I ask the selected models for score recommendations?",
             "answers": unresolved,
             "commands": [f"pruefung grade-make {exam_id}"],
         }
     return "responses_and_grading", {
         "kind": "monitoring",
         "reason": f"Exam {exam_id} is graded and ready for aggregate reporting.",
+        "user_message": "Grading is complete. I can prepare the post-exam report with question-by-question results.",
         "commands": [
             f"pruefung grade-report {exam_id} -H",
             f"pruefung post-exam-report {exam_id}",

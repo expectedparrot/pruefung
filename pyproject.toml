@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pruefung"
-version = "0.1.3"
+version = "0.1.4"
 description = "Agent-first EDSL exam authoring, quality-control, deployment, and grading CLI"
 readme = "README.md"
 requires-python = ">=3.10"
