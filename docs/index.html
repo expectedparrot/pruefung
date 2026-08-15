@@ -30,7 +30,7 @@
     <h1>Build exams you can inspect.</h1>
     <p class="dek">Pruefung helps a professor and a coding agent turn course materials into a durable item bank, check questions with an independent panel, field a frozen EDSL survey, and grade responses without hiding the answer key inside the survey.</p>
     <div class="cta"><a class="primary" href="https://github.com/expectedparrot/pruefung">View on GitHub →</a><a class="secondary" href="https://docs.expectedparrot.com/">Explore EDSL</a></div>
-    <span class="tag">Version 0.1.5 · Python 3.10+</span>
+    <span class="tag">Version 0.1.6 · Python 3.10+</span>
   </header>
 
   <section id="why"><h2>What Pruefung does</h2>
@@ -152,8 +152,10 @@ pruefung grade quiz-1</code></pre>
     <pre><code class="language-bash">pruefung grade-report quiz-1 -H
 pruefung grade-report quiz-1 --anonymize
 pruefung post-exam-report quiz-1
-pruefung post-exam-report quiz-1 --output reports/quiz-1.html</code></pre>
+pruefung student-report quiz-1 student@example.edu
+pruefung student-reports quiz-1</code></pre>
     <p>The self-contained HTML report is aggregate and contains every frozen question, its options, answer or score distribution, points earned, correct answer or free-text rubric, and the authored explanation. Free-text scores appear after the rubric-judge task has been run and ingested.</p>
+    <p>Individual and batch instructor reports are printable, Expected Parrot-branded cut sheets. Each section includes the student's response, score, rubric or correct answer, explanation, and the native EDSL grader comments explaining deductions. They contain protected student information and should not be published.</p>
     <div class="box"><strong>Scope boundary.</strong> Pruefung v1 administers exams to people. Having AI models take a deployed exam for score comparison is not yet a managed workflow; do not run ad hoc model jobs against frozen exam files.</div>
   </section>
 

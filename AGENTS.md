@@ -111,12 +111,18 @@ pruefung grade-make <exam-id>
 python .pruefung/inference/<task-id>/run.py --yes
 pruefung grade-ingest <exam-id> <task-id>
 pruefung post-exam-report <exam-id>
+pruefung student-reports <exam-id>
 ```
 
-Inspect the model scores and rubric-cited justifications before ingestion. If
+Inspect the model scores and rubric-specific feedback before ingestion. If
 the panel disagreement exceeds the managed threshold, leave the item marked
 `needs_review` for professor judgment; do not present an unresolved report as
 final. Regenerate the post-exam report after any manual grading decision.
+Use `student-report <exam-id> <email-or-name>` for one detailed instructor copy,
+or `student-reports <exam-id>` for printable cut sheets covering every student.
+These reports contain student responses and must remain private. Include the
+native EDSL score comment as grader feedback; do not create a redundant model
+question solely to request a justification.
 
 Coop calls for Humanize deployment and response retrieval are network I/O, not
 model inference. Let EDSL manage credentials. Never print, copy, store, or

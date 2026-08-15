@@ -272,6 +272,7 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
         "commands": [
             f"pruefung grade-report {exam_id} -H",
             f"pruefung post-exam-report {exam_id}",
+            f"pruefung student-reports {exam_id}",
         ],
     }
 
@@ -1368,7 +1369,10 @@ def main():
     else:
         scenarios = ScenarioList.from_dict(json.loads((here / "scenarios.edsl.json").read_text()))
         results = survey.by(scenarios).by(models).run()
-        rows = results.select("model.model", "scenario.*", "answer.*").to_dicts()
+        names = ["model.model", "scenario.*", "answer.*"]
+        if task["kind"] == "rubric_grade":
+            names.append("comment.*")
+        rows = results.select(*names).to_dicts()
         if task["kind"] == "concept_suggest":
             suggestions = []
             for row in rows:
@@ -2063,6 +2067,67 @@ def render_grade_report_html(report: dict[str, Any]) -> str:
 <body><main><header><div class="brand-row"><div class="kicker">Pruefung · Post-exam report</div><a class="brand" href="https://www.expectedparrot.com/">E[&#x1f99c;] Expected Parrot</a></div><h1>{esc(report["exam_id"])}</h1><div class="summary">{summary["count"]} graded response(s) · Mean {esc(summary["mean"])} · Median {esc(summary["median"])}</div></header>{"".join(question_cards)}<footer>Generated {esc(report["generated_at"])} by <a href="https://github.com/expectedparrot/pruefung">Pruefung</a> · Expected Parrot</footer></main></body></html>"""
 
 
+def find_student(gradebook: dict[str, Any], query: str) -> dict[str, Any]:
+    query_lower = query.strip().lower()
+    students = gradebook.get("students", [])
+    exact = [
+        row for row in students if query_lower in {str(row.get("email", "")).lower(), str(row.get("name", "")).lower()}
+    ]
+    matches = exact or [
+        row
+        for row in students
+        if query_lower in str(row.get("email", "")).lower() or query_lower in str(row.get("name", "")).lower()
+    ]
+    if not matches:
+        raise ValidationError(f"student not found in gradebook: {query}")
+    if len(matches) > 1:
+        raise ValidationError(f"student lookup is ambiguous: {query}")
+    return matches[0]
+
+
+def render_student_reports_html(exam: dict[str, Any], students: list[dict[str, Any]]) -> str:
+    def esc(value: Any) -> str:
+        return html.escape(str(value))
+
+    sheets = []
+    for student in students:
+        item_by_name = {item["question_name"]: item for item in student.get("items", [])}
+        cards = []
+        for number, row in enumerate(exam.get("questions", []), start=1):
+            frozen, qname = row["frozen"], row["question_name"]
+            meta, edsl_data = frozen["meta"], frozen["edsl"]
+            item = item_by_name.get(qname, {})
+            options = edsl_data.get("question_options", [])
+            response = display_answer(item.get("answer"), meta["ptype"], options)
+            expected = (
+                meta.get("rubric")
+                if meta["ptype"] == "free_text"
+                else display_answer(meta.get("answer"), meta["ptype"], options)
+            )
+            feedback = "".join(
+                f"<li><strong>{esc(panel.get('model') or 'Reviewer')}:</strong> {esc(panel.get('feedback') or panel.get('justification') or 'No comment provided.')}</li>"
+                for panel in item.get("panel", [])
+            )
+            score = item.get("score")
+            score_label = (
+                "Needs review" if score is None else f"{score:g} / {float(item.get('max_points', meta['points'])):g}"
+            )
+            cards.append(
+                f"""<section class="question"><div class="qhead"><span>Question {number} · {esc(meta["concept"])}</span><b>{esc(score_label)}</b></div>
+<h2>{esc(edsl_data["question_text"])}</h2>
+<div class="response"><strong>Student response</strong><p>{esc(response)}</p></div>
+<div class="rubric"><strong>{"Rubric" if meta["ptype"] == "free_text" else "Correct answer"}</strong><p>{esc(expected)}</p></div>
+<div class="explanation"><strong>Explanation</strong><p>{esc(meta.get("explanation") or "No explanation was provided.")}</p></div>
+<div class="feedback"><strong>Grader feedback</strong>{"<ul>" + feedback + "</ul>" if feedback else "<p>No grader comment was recorded.</p>"}</div></section>"""
+            )
+        identity = student.get("name") or student.get("email") or "Student"
+        sheets.append(
+            f"""<article class="sheet"><header><div class="brand-row"><div class="kicker">Pruefung · Detailed instructor report</div><a class="brand" href="https://www.expectedparrot.com/">E[&#x1f99c;] Expected Parrot</a></div><h1>{esc(identity)}</h1><div class="summary">{esc(student.get("email", ""))} · Total {esc(student.get("score"))} / {esc(student.get("total_points"))}</div><div class="private">Instructor copy · Contains student information</div></header>{"".join(cards)}</article>"""
+        )
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(exam["exam_id"])} student reports</title><style>
+:root{{--green:#4f812f;--pale:#edf5e8;--ink:#192116;--muted:#667061;--line:#dbe4d7;--gold:#e7a739}}*{{box-sizing:border-box}}body{{margin:0;background:#f3f5f1;color:var(--ink);font:15px/1.5 system-ui,sans-serif}}.sheet{{max-width:920px;margin:28px auto;padding:24px}}header,.question{{background:#fff;border:1px solid var(--line);border-radius:12px;padding:26px;margin-bottom:20px}}.brand-row,.qhead{{display:flex;justify-content:space-between;align-items:baseline;gap:16px}}.brand-row{{padding-bottom:12px;border-bottom:3px solid var(--green)}}.brand{{color:var(--green);font:600 .95rem Georgia,serif;text-decoration:none}}.kicker{{color:var(--green);font-weight:750;text-transform:uppercase;font-size:.76rem;letter-spacing:.08em}}h1,h2{{font-family:Georgia,serif}}h1{{margin:.55em 0 .15em}}h2{{font-size:1.3rem}}.summary{{color:var(--muted)}}.private{{display:inline-block;margin-top:13px;padding:5px 9px;background:#fff3d2;color:#684b13;border-radius:5px;font-size:.78rem;font-weight:700}}.qhead{{color:var(--green);font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}}.response,.rubric,.explanation,.feedback{{padding:12px 15px;margin:12px 0;background:var(--pale);border-radius:7px}}.response{{background:#f6f7f5}}p{{margin:.35em 0;white-space:pre-wrap}}ul{{margin:.5em 0;padding-left:22px}}li{{margin:.4em 0}}@media print{{body{{background:#fff}}.sheet{{max-width:none;margin:0;padding:0;break-after:page}}.sheet:last-child{{break-after:auto}}header,.question{{break-inside:avoid;box-shadow:none}}}}@media(max-width:600px){{.brand-row,.qhead{{display:block}}}}</style></head><body>{"".join(sheets)}</body></html>"""
+
+
 @cli.command("grade-report")
 @click.argument("exam_id")
 @click.option("--anonymize", is_flag=True, help="Replace student identities with stable labels.")
@@ -2083,16 +2148,19 @@ def grade_report_cmd(
     gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
     if not gradebook:
         raise ValidationError(f"run `pruefung grade {exam_id}` first")
-    if student:
-        selected = [row for row in gradebook.get("students", []) if row["email"].lower() == student.lower()]
-        if not selected:
-            raise ValidationError(f"student not found in gradebook: {student}")
-        gradebook = {**gradebook, "students": selected}
+    selected_student = find_student(gradebook, student) if student else None
+    if selected_student:
+        gradebook = {**gradebook, "students": [selected_student]}
     report = grade_report_data(exam, gradebook, anonymize)
     if html_path:
         html_path = html_path.resolve()
         html_path.parent.mkdir(parents=True, exist_ok=True)
-        html_path.write_text(render_grade_report_html(report), encoding="utf-8")
+        rendered = (
+            render_student_reports_html(exam, [selected_student])
+            if selected_student
+            else render_grade_report_html(report)
+        )
+        html_path.write_text(rendered, encoding="utf-8")
         report["html"] = str(html_path)
     if human:
         click.echo(f"{exam_id}: {report['summary']['count']} graded response(s)")
@@ -2103,6 +2171,45 @@ def grade_report_cmd(
             )
         return
     emit(ctx, report)
+
+
+@cli.command("student-report")
+@click.argument("exam_id")
+@click.argument("student")
+@click.option("--output", type=click.Path(path_type=Path), help="Output HTML path.")
+@human_option
+@click.pass_context
+def student_report_cmd(ctx: click.Context, exam_id: str, student: str, output: Path | None, human: bool) -> None:
+    root = setup(ctx, "student report", human)
+    _, exam = load_exam(root, exam_id)
+    gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
+    if not gradebook:
+        raise ValidationError(f"run `pruefung grade {exam_id}` first")
+    selected = find_student(gradebook, student)
+    output = (output or Path.cwd() / f"{exam_id}-{slugify(student)}-report.html").resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render_student_reports_html(exam, [selected]), encoding="utf-8")
+    emit(ctx, {"exam_id": exam_id, "student": selected["email"], "html": str(output)})
+
+
+@cli.command("student-reports")
+@click.argument("exam_id")
+@click.option("--output", type=click.Path(path_type=Path), help="Combined printable HTML path.")
+@human_option
+@click.pass_context
+def student_reports_cmd(ctx: click.Context, exam_id: str, output: Path | None, human: bool) -> None:
+    root = setup(ctx, "student reports", human)
+    _, exam = load_exam(root, exam_id)
+    gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
+    if not gradebook:
+        raise ValidationError(f"run `pruefung grade {exam_id}` first")
+    students = gradebook.get("students", [])
+    if not students:
+        raise ValidationError("the gradebook has no students")
+    output = (output or Path.cwd() / f"{exam_id}-student-reports.html").resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render_student_reports_html(exam, students), encoding="utf-8")
+    emit(ctx, {"exam_id": exam_id, "students": len(students), "html": str(output)})
 
 
 @cli.command("post-exam-report")
@@ -2116,7 +2223,7 @@ def post_exam_report_cmd(ctx: click.Context, exam_id: str, output: Path | None, 
     gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
     if not gradebook:
         raise ValidationError(f"run `pruefung grade {exam_id}` first")
-    output = (output or state(root) / "reports" / f"{exam_id}.html").resolve()
+    output = (output or Path.cwd() / f"{exam_id}-report.html").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     report = grade_report_data(exam, gradebook, anonymize=True)
     output.write_text(render_grade_report_html(report), encoding="utf-8")
@@ -2195,12 +2302,13 @@ def grade_make_cmd(ctx: click.Context, exam_id: str, models: str, force: bool, h
         [
             edsl.QuestionNumerical(
                 question_name="score",
-                question_text="Score the student answer using the question, rubric, and point maximum in {{ input }}",
+                question_text=(
+                    "Score the student answer using the question, rubric, and point maximum in {{ input }}. "
+                    "In the answer comment, explain specifically which rubric criteria were met, which were missing, "
+                    "and why any points were deducted."
+                ),
                 min_value=0,
                 max_value=max(float(item["points"]) for item in scenarios),
-            ),
-            edsl.QuestionFreeText(
-                question_name="justification", question_text="Justify the score by citing rubric criteria."
             ),
         ]
     )
@@ -2246,8 +2354,8 @@ def grade_ingest_cmd(ctx: click.Context, exam_id: str, task_ref: str, human: boo
     for row in rows:
         scenario = row.get("input", row.get("scenario", {}))
         answer_id = scenario.get("answer_id") if isinstance(scenario, dict) else row.get("answer_id")
-        if not answer_id or row.get("score") is None or row.get("justification") is None:
-            raise ValidationError("every rubric result row requires answer_id, score, and justification")
+        if not answer_id or row.get("score") is None:
+            raise ValidationError("every rubric result row requires answer_id and score")
         grouped[str(answer_id)].append(row)
     gb_path = state(root) / "gradebooks" / f"{exam_id}.gradebook.json"
     gradebook = read_json(gb_path)
@@ -2265,7 +2373,17 @@ def grade_ingest_cmd(ctx: click.Context, exam_id: str, task_ref: str, human: boo
                 raise ValidationError(f"rubric score outside 0-{item['max_points']} for {answer_id}")
             threshold = float(item["max_points"]) * 0.25
             item["panel"] = [
-                {"model": row.get("model"), "score": float(row["score"]), "justification": row["justification"]}
+                {
+                    "model": row.get("model"),
+                    "score": float(row["score"]),
+                    "feedback": (
+                        row.get("score_comment")
+                        or row.get("comment.score_comment")
+                        or row.get("justification_comment")
+                        or row.get("justification")
+                        or ""
+                    ),
+                }
                 for row in verdicts
             ]
             if max(scores) - min(scores) <= threshold:

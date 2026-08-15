@@ -576,13 +576,13 @@ def test_post_exam_html_and_llm_rubric_grading(tmp_path, monkeypatch):
                     "input": {"answer_id": "student@example.edu:q2_topic"},
                     "model": "test",
                     "score": 4,
-                    "justification": "Applies the rule.",
+                    "score_comment": "Applies every rubric criterion.",
                 },
                 {
                     "input": {"answer_id": "second@example.edu:q2_topic"},
                     "model": "test",
                     "score": 0,
-                    "justification": "No rubric criteria.",
+                    "score_comment": "Does not address any rubric criterion.",
                 },
             ]
         },
@@ -595,6 +595,17 @@ def test_post_exam_html_and_llm_rubric_grading(tmp_path, monkeypatch):
         "student@example.edu": 6,
         "second@example.edu": 0,
     }
+    scored_item = next(
+        item
+        for student in gradebook["students"]
+        if student["email"] == "student@example.edu"
+        for item in student["items"]
+        if item["question_name"] == "q2_topic"
+    )
+    assert scored_item["panel"][0]["feedback"] == "Applies every rubric criterion."
+    assert "comment.*" in (task_dir / "run.py").read_text()
+    grading_survey = read_json(task_dir / "survey.edsl.json")
+    assert [question["question_name"] for question in grading_survey["questions"]] == ["score"]
     assert "student@example.edu,,6.0,6.0" in (tmp_path / ".pruefung/gradebooks/quiz-1.gradebook.csv").read_text()
 
     output = tmp_path / "report.html"
@@ -610,5 +621,21 @@ def test_post_exam_html_and_llm_rubric_grading(tmp_path, monkeypatch):
     assert "student@example.edu" not in page
     assert "E[&#x1f99c;] Expected Parrot" in page
     assert "github.com/expectedparrot/pruefung" in page
+    student_output = tmp_path / "horton.html"
+    student_report = runner.invoke(
+        cli,
+        ["student-report", "quiz-1", "student@example.edu", "--output", str(student_output)],
+    )
+    assert student_report.exit_code == 0, student_report.output
+    student_page = student_output.read_text()
+    assert "Because the lecture rule selects beta." in student_page
+    assert "Applies every rubric criterion." in student_page
+    assert "4 / 4" in student_page
+    assert "E[&#x1f99c;] Expected Parrot" in student_page
+    cut_sheets = tmp_path / "cut-sheets.html"
+    batch = runner.invoke(cli, ["student-reports", "quiz-1", "--output", str(cut_sheets)])
+    assert batch.exit_code == 0, batch.output
+    assert "second@example.edu" in cut_sheets.read_text()
     final_step = json.loads(runner.invoke(cli, ["agent", "next"]).output)["data"]
-    assert final_step["action"]["commands"][-1] == "pruefung post-exam-report quiz-1"
+    assert "pruefung post-exam-report quiz-1" in final_step["action"]["commands"]
+    assert "pruefung student-reports quiz-1" in final_step["action"]["commands"]
