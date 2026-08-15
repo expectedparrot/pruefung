@@ -70,6 +70,7 @@ def question_hash(question: dict[str, Any]) -> str:
             "edsl": question.get("edsl"),
             "answer": meta.get("answer"),
             "rubric": meta.get("rubric"),
+            "explanation": meta.get("explanation"),
             "points": meta.get("points"),
         }
     )

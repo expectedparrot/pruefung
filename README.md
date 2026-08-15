@@ -14,3 +14,9 @@ pruefung agent next
 ```
 
 `agent next` inspects the current workspace and returns the next safe action as JSON.
+
+After grading, `pruefung post-exam-report <exam-id>` writes a self-contained,
+aggregate HTML report with every question, response distributions, performance,
+the correct answer or rubric, and the authored explanation. Free-text answers
+use the auditable `grade-make` → approved runner → `grade-ingest` rubric-scoring
+workflow before appearing in the report.

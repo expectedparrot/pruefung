@@ -69,6 +69,25 @@ makes that approval stale. Preserve panel evidence when using the explicit
 Use `exam deploy --open` for a shared URL without a roster. Use
 `pruefung grade-report <exam-id> --anonymize` for item and concept statistics
 without reading or exposing protected gradebook files.
+After grading, use `pruefung post-exam-report <exam-id>` to write a
+self-contained aggregate HTML report. Author explanations with `question add
+--explanation ...`; they remain private metadata and never enter the deployed
+EDSL survey.
+
+For exams with free-text items, follow the complete post-exam sequence:
+
+```bash
+pruefung grade <exam-id>
+pruefung grade-make <exam-id>
+python .pruefung/inference/<task-id>/run.py --yes
+pruefung grade-ingest <exam-id> <task-id>
+pruefung post-exam-report <exam-id>
+```
+
+Inspect the model scores and rubric-cited justifications before ingestion. If
+the panel disagreement exceeds the managed threshold, leave the item marked
+`needs_review` for professor judgment; do not present an unresolved report as
+final. Regenerate the post-exam report after any manual grading decision.
 
 Coop calls for Humanize deployment and response retrieval are network I/O, not
 model inference. Let EDSL manage credentials. Never print, copy, store, or

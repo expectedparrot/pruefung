@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import html
 import json
 import random
 import shutil
@@ -233,13 +234,34 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
         }
 
     exam = exams[-1]
+    exam_id = exam["exam_id"]
+    gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
+    if not gradebook:
+        return "responses_and_grading", {
+            "kind": "monitoring",
+            "reason": f"Exam {exam_id} is deployed and has not been graded yet.",
+            "commands": [f"pruefung status {exam_id}", f"pruefung grade {exam_id}"],
+        }
+    unresolved = [
+        f"{student['email']}:{item['question_name']}"
+        for student in gradebook.get("students", [])
+        for item in student.get("items", [])
+        if item.get("needs_review")
+    ]
+    if unresolved:
+        return "free_text_grading", {
+            "kind": "external_execution",
+            "reason": f"{len(unresolved)} free-text answer(s) require rubric scoring or professor review.",
+            "requires_approval": True,
+            "answers": unresolved,
+            "commands": [f"pruefung grade-make {exam_id}"],
+        }
     return "responses_and_grading", {
         "kind": "monitoring",
-        "reason": f"Exam {exam['exam_id']} is deployed.",
+        "reason": f"Exam {exam_id} is graded and ready for aggregate reporting.",
         "commands": [
-            f"pruefung status {exam['exam_id']}",
-            f"pruefung grade {exam['exam_id']}",
-            f"pruefung grade-report {exam['exam_id']} -H",
+            f"pruefung grade-report {exam_id} -H",
+            f"pruefung post-exam-report {exam_id}",
         ],
     }
 
@@ -571,7 +593,15 @@ def concepts_suggest(ctx: click.Context, materials: str | None, models: str, for
         survey,
         force,
     )
-    emit(ctx, {"task_id": task_id, "created": created, "run": f"python .pruefung/inference/{task_id}/run.py"})
+    emit(
+        ctx,
+        {
+            "task_id": task_id,
+            "created": created,
+            "run": f"python .pruefung/inference/{task_id}/run.py --yes",
+            "requires_approval": True,
+        },
+    )
 
 
 @cli.group("question")
@@ -640,6 +670,8 @@ def parse_answer(ptype: str, answer: str | None, option_count: int) -> Any:
 @click.option("--concept", required=True)
 @click.option("--rubric")
 @click.option("--rubric-file", type=click.Path(path_type=Path, exists=True))
+@click.option("--explanation", help="Explanation shown in the post-exam report.")
+@click.option("--explanation-file", type=click.Path(path_type=Path, exists=True))
 @click.option("--partial-credit", type=click.Choice(["none", "per_option"]), default="none")
 @click.option("--distractor-notes")
 @click.option("--source-material", multiple=True)
@@ -658,6 +690,8 @@ def question_add(
     concept: str,
     rubric: str | None,
     rubric_file: Path | None,
+    explanation: str | None,
+    explanation_file: Path | None,
     partial_credit: str,
     distractor_notes: str | None,
     source_material: tuple[str, ...],
@@ -683,6 +717,9 @@ def question_add(
     if ptype in {"true_false", "free_text"} and options:
         raise ValidationError(f"{ptype} does not accept options")
     rubric = rubric if rubric is not None else (rubric_file.read_text(encoding="utf-8") if rubric_file else None)
+    if explanation and explanation_file:
+        raise ValidationError("use only one explanation input")
+    explanation = explanation or (explanation_file.read_text(encoding="utf-8") if explanation_file else None)
     if ptype == "free_text" and not rubric:
         raise ValidationError("free_text requires --rubric or --rubric-file")
     parsed_answer = parse_answer(ptype, answer, len(options))
@@ -718,6 +755,8 @@ def question_add(
         meta["partial_credit"] = partial_credit
     if rubric:
         meta["rubric"] = rubric
+    if explanation:
+        meta["explanation"] = explanation
     if distractor_notes:
         meta["distractor_notes"] = distractor_notes
     if source_material:
@@ -750,7 +789,7 @@ def question_set(ctx: click.Context, qid: str, field: str, value: str, human: bo
     q = load_question(root, qid)
     mapping = {"distractor-notes": "distractor_notes", "partial-credit": "partial_credit"}
     field = mapping.get(field, field)
-    if field not in {"points", "concept", "answer", "rubric", "distractor_notes", "partial_credit"}:
+    if field not in {"points", "concept", "answer", "rubric", "explanation", "distractor_notes", "partial_credit"}:
         raise ValidationError(f"unsupported field: {field}")
     if field == "points":
         value = float(value)
@@ -1884,6 +1923,18 @@ def correlation(xs: list[float], ys: list[float]) -> float | None:
     return numerator / denominator if denominator else None
 
 
+def display_answer(value: Any, ptype: str, options: list[str]) -> str:
+    if value is None:
+        return "No response"
+    if ptype == "true_false":
+        return "True" if value is True else "False"
+    if ptype == "mcq" and isinstance(value, int) and 0 <= value < len(options):
+        return options[value]
+    if ptype == "checkbox" and isinstance(value, list):
+        return ", ".join(options[index] for index in value if isinstance(index, int) and 0 <= index < len(options))
+    return str(value)
+
+
 def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize: bool) -> dict[str, Any]:
     students = gradebook.get("students", [])
     scores = [float(student["score"]) for student in students]
@@ -1904,24 +1955,36 @@ def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize
         student_items = [next((item for item in s["items"] if item["question_name"] == qname), {}) for s in students]
         ratios = [float(item.get("score") or 0) / float(item.get("max_points") or 1) for item in student_items]
         concepts[frozen["meta"]["concept"]].extend(ratios)
-        answer_counts = (
-            Counter(str(item.get("answer")) for item in student_items)
-            if frozen["meta"]["ptype"] != "free_text"
-            else None
+        ptype = frozen["meta"]["ptype"]
+        options = frozen["edsl"].get("question_options", [])
+        answer_counts = Counter(display_answer(item.get("answer"), ptype, options) for item in student_items)
+        score_counts = Counter(str(item.get("score")) for item in student_items)
+        correct_answer = (
+            frozen["meta"].get("rubric")
+            if ptype == "free_text"
+            else display_answer(frozen["meta"].get("answer"), ptype, options)
         )
         items.append(
             {
                 "id": qid,
                 "question_name": qname,
+                "text": frozen["edsl"]["question_text"],
+                "options": options,
                 "concept": frozen["meta"]["concept"],
-                "type": frozen["meta"]["ptype"],
+                "type": ptype,
+                "points": frozen["meta"]["points"],
+                "correct_answer": correct_answer,
+                "explanation": frozen["meta"].get("explanation") or "No explanation was provided.",
                 "mean_proportion": statistics.mean(ratios) if ratios else None,
                 "score_total_correlation": correlation(ratios, scores),
-                "answer_counts": dict(answer_counts) if answer_counts is not None else None,
+                "answer_counts": dict(answer_counts) if ptype != "free_text" else None,
+                "score_counts": dict(score_counts),
+                "responses": len(student_items),
             }
         )
     return {
         "exam_id": exam["exam_id"],
+        "generated_at": now(),
         "anonymized": anonymize,
         "summary": {
             "count": len(scores),
@@ -1935,13 +1998,57 @@ def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize
     }
 
 
+def render_grade_report_html(report: dict[str, Any]) -> str:
+    def esc(value: Any) -> str:
+        return html.escape(str(value))
+
+    question_cards = []
+    for item in report["items"]:
+        distribution = item["answer_counts"] or item["score_counts"]
+        maximum = max(distribution.values(), default=1)
+        bars = "".join(
+            f'<div class="bar-row"><span>{esc(label)}</span><div class="track"><i style="width:{100 * count / maximum:.1f}%"></i></div><b>{count}</b></div>'
+            for label, count in distribution.items()
+        )
+        options = ""
+        if item["options"]:
+            options = "<ol>" + "".join(f"<li>{esc(option)}</li>" for option in item["options"]) + "</ol>"
+        performance = (
+            "No scored responses"
+            if item["mean_proportion"] is None
+            else f"{100 * item['mean_proportion']:.1f}% of available points earned"
+        )
+        label = "Rubric" if item["type"] == "free_text" else "Correct answer"
+        distribution_label = "Score distribution" if item["type"] == "free_text" else "Answer distribution"
+        question_cards.append(
+            f"""<section class="question"><div class="kicker">{esc(item["id"])} · {esc(item["concept"])} · {esc(item["points"])} point(s)</div>
+<h2>{esc(item["text"])}</h2>{options}<div class="performance">{esc(performance)}</div>
+<h3>{distribution_label}</h3>{bars or "<p>No responses.</p>"}
+<div class="answer"><strong>{label}:</strong> {esc(item["correct_answer"])}</div>
+<div class="explanation"><strong>Explanation:</strong> {esc(item["explanation"])}</div></section>"""
+        )
+    summary = report["summary"]
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(report["exam_id"])} post-exam report</title><style>
+:root{{--green:#4f812f;--dark:#274119;--pale:#edf5e8;--ink:#192116;--muted:#667061;--line:#dbe4d7}}*{{box-sizing:border-box}}body{{margin:0;background:#f3f5f1;color:var(--ink);font:16px/1.55 system-ui,sans-serif}}main{{max-width:920px;margin:auto;padding:44px 24px}}header,.question{{background:white;border:1px solid var(--line);border-radius:12px;padding:28px;margin-bottom:22px}}.brand-row{{display:flex;align-items:baseline;justify-content:space-between;gap:18px;padding-bottom:12px;margin-bottom:22px;border-bottom:3px solid var(--green)}}.brand{{color:var(--green);font:600 .95rem Georgia,serif;text-decoration:none}}h1,h2{{font-family:Georgia,serif}}h1{{margin:.2em 0}}h2{{font-size:1.4rem}}h3{{margin-bottom:8px}}.kicker{{color:var(--green);font-weight:750;text-transform:uppercase;font-size:.78rem;letter-spacing:.08em}}.summary{{color:var(--muted)}}.performance,.answer,.explanation{{padding:13px 15px;margin:14px 0;background:var(--pale);border-radius:7px}}.bar-row{{display:grid;grid-template-columns:minmax(120px,2fr) 5fr 35px;gap:10px;align-items:center;margin:8px 0}}.track{{height:15px;background:#e5e9e2;border-radius:20px;overflow:hidden}}.track i{{display:block;height:100%;background:var(--green)}}ol{{padding-left:24px}}footer{{margin-top:36px;padding:18px 0;border-top:1px solid var(--line);color:var(--muted);font-size:.8rem;text-align:center}}footer a{{color:var(--green)}}@media(max-width:600px){{.bar-row{{grid-template-columns:1fr 2fr 28px}}.brand-row{{display:block}}}}</style></head>
+<body><main><header><div class="brand-row"><div class="kicker">Pruefung · Post-exam report</div><a class="brand" href="https://www.expectedparrot.com/">E[&#x1f99c;] Expected Parrot</a></div><h1>{esc(report["exam_id"])}</h1><div class="summary">{summary["count"]} graded response(s) · Mean {esc(summary["mean"])} · Median {esc(summary["median"])}</div></header>{"".join(question_cards)}<footer>Generated {esc(report["generated_at"])} by <a href="https://github.com/expectedparrot/pruefung">Pruefung</a> · Expected Parrot</footer></main></body></html>"""
+
+
 @cli.command("grade-report")
 @click.argument("exam_id")
 @click.option("--anonymize", is_flag=True, help="Replace student identities with stable labels.")
 @click.option("--student", help="Limit the student table to one email address.")
+@click.option("--html", "html_path", type=click.Path(path_type=Path), help="Write a self-contained HTML report.")
 @human_option
 @click.pass_context
-def grade_report_cmd(ctx: click.Context, exam_id: str, anonymize: bool, student: str | None, human: bool) -> None:
+def grade_report_cmd(
+    ctx: click.Context,
+    exam_id: str,
+    anonymize: bool,
+    student: str | None,
+    html_path: Path | None,
+    human: bool,
+) -> None:
     root = setup(ctx, "grade report", human)
     _, exam = load_exam(root, exam_id)
     gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
@@ -1953,6 +2060,11 @@ def grade_report_cmd(ctx: click.Context, exam_id: str, anonymize: bool, student:
             raise ValidationError(f"student not found in gradebook: {student}")
         gradebook = {**gradebook, "students": selected}
     report = grade_report_data(exam, gradebook, anonymize)
+    if html_path:
+        html_path = html_path.resolve()
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(render_grade_report_html(report), encoding="utf-8")
+        report["html"] = str(html_path)
     if human:
         click.echo(f"{exam_id}: {report['summary']['count']} graded response(s)")
         click.echo(f"Mean: {report['summary']['mean']}  Median: {report['summary']['median']}")
@@ -1962,6 +2074,24 @@ def grade_report_cmd(ctx: click.Context, exam_id: str, anonymize: bool, student:
             )
         return
     emit(ctx, report)
+
+
+@cli.command("post-exam-report")
+@click.argument("exam_id")
+@click.option("--output", type=click.Path(path_type=Path), help="HTML path; defaults inside .pruefung/reports.")
+@human_option
+@click.pass_context
+def post_exam_report_cmd(ctx: click.Context, exam_id: str, output: Path | None, human: bool) -> None:
+    root = setup(ctx, "post-exam report", human)
+    _, exam = load_exam(root, exam_id)
+    gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
+    if not gradebook:
+        raise ValidationError(f"run `pruefung grade {exam_id}` first")
+    output = (output or state(root) / "reports" / f"{exam_id}.html").resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    report = grade_report_data(exam, gradebook, anonymize=True)
+    output.write_text(render_grade_report_html(report), encoding="utf-8")
+    emit(ctx, {"exam_id": exam_id, "html": str(output), "questions": len(report["items"])})
 
 
 @cli.command("status")
@@ -2052,7 +2182,15 @@ def grade_make_cmd(ctx: click.Context, exam_id: str, models: str, force: bool, h
         force,
         task_extra={"exam_id": exam_id},
     )
-    emit(ctx, {"task_id": task_id, "created": created, "run": f"python .pruefung/inference/{task_id}/run.py"})
+    emit(
+        ctx,
+        {
+            "task_id": task_id,
+            "created": created,
+            "run": f"python .pruefung/inference/{task_id}/run.py --yes",
+            "requires_approval": True,
+        },
+    )
 
 
 @cli.command("grade-ingest")
@@ -2090,6 +2228,8 @@ def grade_ingest_cmd(ctx: click.Context, exam_id: str, task_ref: str, human: boo
             if not verdicts or item.get("score") is not None or item.get("override"):
                 continue
             scores = [float(row["score"]) for row in verdicts]
+            if any(score < 0 or score > float(item["max_points"]) for score in scores):
+                raise ValidationError(f"rubric score outside 0-{item['max_points']} for {answer_id}")
             threshold = float(item["max_points"]) * 0.25
             item["panel"] = [
                 {"model": row.get("model"), "score": float(row["score"]), "justification": row["justification"]}
@@ -2103,6 +2243,13 @@ def grade_ingest_cmd(ctx: click.Context, exam_id: str, task_ref: str, human: boo
             updated.append(answer_id)
         student["score"] = sum(item.get("score") or 0 for item in student["items"])
     write_json(gb_path, gradebook)
+    csv_path = state(root) / "gradebooks" / f"{exam_id}.gradebook.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["email", "name", "score", "total_points"])
+        writer.writerows(
+            [[row["email"], row["name"], row["score"], row["total_points"]] for row in gradebook["students"]]
+        )
     task.update(status="ingested", ingested_at=now())
     write_json(task_path, task)
     emit(ctx, {"task_id": task["task_id"], "updated": updated})
@@ -2179,6 +2326,7 @@ SCHEMAS = {
                 "concept": "confidence_intervals",
                 "points": 2,
                 "answer": 2,
+                "explanation": "The procedure, not any one realized interval, has 95% coverage.",
                 "status": "draft",
                 "content_hash": "sha256...",
             },

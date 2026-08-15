@@ -7,7 +7,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from pruefung.cli import cli
-from pruefung.core import read_json, score_checkbox, write_json
+from pruefung.core import question_hash, read_json, score_checkbox, write_json
 
 
 def invoke(runner, root, args):
@@ -410,3 +410,118 @@ def test_open_deploy_and_qc_override(tmp_path, monkeypatch):
     dry_run = runner.invoke(cli, ["exam", "deploy", "open-quiz", "--open", "--dry-run"])
     assert dry_run.exit_code == 0, dry_run.output
     assert json.loads(dry_run.output)["data"]["enrollment_mode"] == "open"
+
+
+def test_post_exam_html_and_llm_rubric_grading(tmp_path, monkeypatch):
+    runner = prepare_exam(tmp_path, monkeypatch)
+    objective_path = tmp_path / ".pruefung/questions/q001.json"
+    objective = read_json(objective_path)
+    objective["meta"]["explanation"] = "Beta follows directly from the lecture."
+    objective["meta"]["content_hash"] = question_hash(objective)
+    write_json(objective_path, objective)
+    added = runner.invoke(
+        cli,
+        [
+            "question",
+            "add",
+            "--type",
+            "free_text",
+            "--name",
+            "explain_topic",
+            "--text",
+            "Explain why beta is correct.",
+            "--points",
+            "4",
+            "--concept",
+            "topic",
+            "--rubric",
+            "4 points: identifies the lecture rule and applies it; 2 points: partial explanation; 0: incorrect.",
+            "--explanation",
+            "A strong response identifies the rule and explicitly applies it to beta.",
+        ],
+    )
+    assert added.exit_code == 0, added.output
+    free_path = tmp_path / ".pruefung/questions/q002.json"
+    free = read_json(free_path)
+    free["meta"]["status"] = "qc_passed"
+    write_json(free_path, free)
+    assert runner.invoke(cli, ["exam", "add", "quiz-1", "q002"]).exit_code == 0
+    monkeypatch.setattr("edsl.Survey.humanize", lambda self, **kwargs: {"human_survey_uuid": "survey-report"})
+    assert runner.invoke(cli, ["exam", "deploy", "quiz-1", "--no-shuffle"]).exit_code == 0
+
+    class FakeCoop:
+        def get_human_survey_responses(self, uuid):
+            assert uuid == "survey-report"
+            return [
+                {
+                    "answer": {
+                        "pruefung_respondent_email": "student@example.edu",
+                        "q1_topic": "beta",
+                        "q2_topic": "Because the lecture rule selects beta.",
+                    }
+                },
+                {
+                    "answer": {
+                        "pruefung_respondent_email": "second@example.edu",
+                        "q1_topic": "alpha",
+                        "q2_topic": "I guessed.",
+                    }
+                },
+            ]
+
+    monkeypatch.setattr("pruefung.integrations.get_coop", lambda: FakeCoop())
+    assert runner.invoke(cli, ["grade", "quiz-1"]).exit_code == 0
+    next_step = json.loads(runner.invoke(cli, ["agent", "next"]).output)["data"]
+    assert next_step["phase"] == "free_text_grading"
+    assert next_step["action"]["commands"] == ["pruefung grade-make quiz-1"]
+    made = runner.invoke(cli, ["grade-make", "quiz-1", "--models", "test"])
+    assert made.exit_code == 0, made.output
+    task_dir = tmp_path / ".pruefung/inference/grade_quiz-1_01"
+    task = read_json(task_dir / "task.json")
+    result = {
+        "task_id": task["task_id"],
+        "kind": "rubric_grade",
+        "input_hashes": task["input_hashes"],
+        "created_at": task["created_at"],
+        "payload": {
+            "rows": [
+                {
+                    "input": {"answer_id": "student@example.edu:q2_topic"},
+                    "model": "test",
+                    "score": 4,
+                    "justification": "Applies the rule.",
+                },
+                {
+                    "input": {"answer_id": "second@example.edu:q2_topic"},
+                    "model": "test",
+                    "score": 0,
+                    "justification": "No rubric criteria.",
+                },
+            ]
+        },
+    }
+    write_json(task_dir / "result.json", result)
+    ingested = runner.invoke(cli, ["grade-ingest", "quiz-1", task["task_id"]])
+    assert ingested.exit_code == 0, ingested.output
+    gradebook = read_json(tmp_path / ".pruefung/gradebooks/quiz-1.gradebook.json")
+    assert {student["email"]: student["score"] for student in gradebook["students"]} == {
+        "student@example.edu": 6,
+        "second@example.edu": 0,
+    }
+    assert "student@example.edu,,6.0,6.0" in (tmp_path / ".pruefung/gradebooks/quiz-1.gradebook.csv").read_text()
+
+    output = tmp_path / "report.html"
+    report = runner.invoke(cli, ["post-exam-report", "quiz-1", "--output", str(output)])
+    assert report.exit_code == 0, report.output
+    page = output.read_text()
+    assert "Choose beta" in page
+    assert "alpha" in page and "beta" in page
+    assert "Beta follows directly from the lecture." in page
+    assert "Explain why beta is correct." in page
+    assert "Score distribution" in page
+    assert "A strong response identifies the rule" in page
+    assert "student@example.edu" not in page
+    assert "E[&#x1f99c;] Expected Parrot" in page
+    assert "github.com/expectedparrot/pruefung" in page
+    final_step = json.loads(runner.invoke(cli, ["agent", "next"]).output)["data"]
+    assert final_step["action"]["commands"][-1] == "pruefung post-exam-report quiz-1"
