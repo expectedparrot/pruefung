@@ -30,7 +30,7 @@
     <h1>Build exams you can inspect.</h1>
     <p class="dek">Pruefung helps a professor and a coding agent turn course materials into a durable item bank, check questions with an independent panel, field a frozen EDSL survey, and grade responses without hiding the answer key inside the survey.</p>
     <div class="cta"><a class="primary" href="https://github.com/expectedparrot/pruefung">View on GitHub →</a><a class="secondary" href="https://docs.expectedparrot.com/">Explore EDSL</a></div>
-    <span class="tag">Version 0.1.1 · Python 3.10+</span>
+    <span class="tag">Version 0.1.2 · Python 3.10+</span>
   </header>
 
   <section id="why"><h2>What Pruefung does</h2>
@@ -101,6 +101,7 @@ pruefung schema concept</code></pre>
     <pre><code>pruefung validate
 pruefung ls -H
 pruefung coverage</code></pre>
+    <p>When three or more questions all use one format, <code>pruefung agent next</code> pauses to ask the professor whether that is intentional or whether the bank should mix multiple choice, checkbox, true/false, and free-text items.</p>
     <div class="warning box"><strong>After a direct edit:</strong> run <code>pruefung validate</code>. A changed content hash resets the question to <code>draft</code> and invalidates pending inference results that were built against the previous version.</div>
   </section>
 
@@ -111,10 +112,11 @@ pruefung inference
 
 # Inspect the package before paid execution
 ls .pruefung/inference/qc_01
-python .pruefung/inference/qc_01/run.py
+python .pruefung/inference/qc_01/run.py --yes
 
 pruefung qc ingest qc_01
 pruefung qc report qc_01 -H
+pruefung qc override q001 --decision pass --reason "Professor reviewed the panel concern"
 pruefung ls --status qc_passed</code></pre>
     <p>The panel answers each item without seeing its key and flags ambiguity, cues, or a likely miskey. Results can be ingested only while their recorded content hashes still match the bank.</p>
   </section>
@@ -135,6 +137,7 @@ pruefung exam stats quiz-1</code></pre>
 pruefung exam preview quiz-1 --web
 pruefung exam deploy quiz-1 --dry-run
 pruefung exam deploy quiz-1</code></pre>
+    <p>If no roster is needed, use <code>pruefung exam deploy quiz-1 --open --dry-run</code>, then repeat with <code>--open</code> to publish one shared URL.</p>
     <p>The real deployment deep-copies every question, applies a consistent option permutation to options and keys, assigns stable exam question names, exports the key-free EDSL Survey, and publishes a private Humanize project. The building exam then becomes immutable.</p>
     <div class="warning box"><strong>Deployment is a checkpoint.</strong> It performs network I/O and freezes the assessment. Inspect the web preview and dry-run output, confirm the roster, and obtain the professor's approval first.</div>
   </section>
@@ -145,6 +148,8 @@ pruefung grade quiz-1</code></pre>
     <p>Multiple-choice and true/false items use exact matching. Checkbox items can use all-or-nothing or explicit per-option partial credit. Existing manual overrides are preserved.</p>
     <p>When free-text answers remain, create and run a rubric panel package at the same inspectable inference boundary. Disagreement beyond the configured tolerance becomes <code>needs_review</code> for the professor rather than a silently chosen score.</p>
     <p>The authoritative JSON gradebook and regenerated CSV live under <code>.pruefung/gradebooks/</code>. Keep these files private: they contain protected student records.</p>
+    <pre><code class="language-bash">pruefung grade-report quiz-1 -H
+pruefung grade-report quiz-1 --anonymize</code></pre>
     <div class="box"><strong>Scope boundary.</strong> Pruefung v1 administers exams to people. Having AI models take a deployed exam for score comparison is not yet a managed workflow; do not run ad hoc model jobs against frozen exam files.</div>
   </section>
 

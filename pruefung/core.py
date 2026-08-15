@@ -80,6 +80,11 @@ def validate_id(value: str, pattern: str, label: str) -> None:
         raise ValidationError(f"invalid {label}: {value}")
 
 
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "source"
+
+
 def question_files(root: Path) -> list[Path]:
     return sorted((state(root) / "questions").glob("q*.json"))
 

@@ -1,5 +1,7 @@
 import json
 import py_compile
+import subprocess
+import sys
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -164,13 +166,20 @@ def test_qc_contract_rejects_raw_results_then_ingests_normalized(tmp_path, monke
     task = read_json(task_dir / "task.json")
     survey = read_json(task_dir / "survey.edsl.json")
     names = [question["question_name"] for question in survey["questions"]]
-    assert "topic_item" in names and "qc_flag_q001" in names
-    flag = next(question for question in survey["questions"] if question["question_name"] == "qc_flag_q001")
+    assert "topic_item" in names and "qc_blocking_q001" in names and "qc_notes_q001" in names
+    flag = next(question for question in survey["questions"] if question["question_name"] == "qc_blocking_q001")
     assert "Choose beta" in flag["question_text"]
     assert "The correct answer is beta" in flag["question_text"]
     assert "material:lecture" in task["input_hashes"]
     assert "raw_results" not in (task_dir / "run.py").read_text()
     py_compile.compile(str(task_dir / "run.py"), doraise=True)
+    approval = subprocess.run(
+        [sys.executable, str(task_dir / "run.py")],
+        capture_output=True,
+        text=True,
+    )
+    assert approval.returncode == 2
+    assert '"requires_approval": true' in approval.stdout
 
     malformed = {
         "task_id": "qc_01",
@@ -188,7 +197,8 @@ def test_qc_contract_rejects_raw_results_then_ingests_normalized(tmp_path, monke
         "questions": {
             "q001": {
                 "panel_answers": [1, "beta", 1],
-                "flags": ["none", "none", "Looks fine"],
+                "blocking": [False, "No", False],
+                "notes": ["none", "none", "Looks fine"],
                 "models": ["gpt-4o", "gpt-4.1-mini", "gemini-2.5-flash"],
             }
         }
@@ -199,6 +209,76 @@ def test_qc_contract_rejects_raw_results_then_ingests_normalized(tmp_path, monke
     assert read_json(tmp_path / ".pruefung/questions/q001.json")["meta"]["status"] == "qc_passed"
     report = runner.invoke(cli, ["qc", "report", "qc_01"])
     assert report.exit_code == 0, report.output
+
+
+def test_question_ids_are_retired_and_source_names_are_slugged(tmp_path, monkeypatch):
+    runner = make_question_project(tmp_path, monkeypatch)
+    assert runner.invoke(cli, ["question", "rm", "q001"]).exit_code == 0
+    source = tmp_path / "extra.md"
+    source.write_text("Extra")
+    added_source = runner.invoke(cli, ["source", "add", str(source), "--name", "Lecture 8: Review"])
+    assert added_source.exit_code == 0, added_source.output
+    assert "lecture-8-review" in read_json(tmp_path / ".pruefung/materials/manifest.json")["sources"]
+    added = runner.invoke(
+        cli,
+        [
+            "question",
+            "add",
+            "--type",
+            "true_false",
+            "--name",
+            "replacement",
+            "--text",
+            "True?",
+            "--answer",
+            "true",
+            "--points",
+            "1",
+            "--concept",
+            "topic",
+        ],
+    )
+    assert json.loads(added.output)["data"]["id"] == "q002"
+
+
+def test_all_mcq_bank_requires_professor_mix_review(tmp_path, monkeypatch):
+    runner = make_question_project(tmp_path, monkeypatch)
+    for number in (2, 3):
+        result = runner.invoke(
+            cli,
+            [
+                "question",
+                "add",
+                "--type",
+                "mcq",
+                "--name",
+                f"item_{number}",
+                "--text",
+                "Pick",
+                "--option",
+                "a",
+                "--option",
+                "b",
+                "--option",
+                "c",
+                "--option",
+                "d",
+                "--answer",
+                "0",
+                "--points",
+                "1",
+                "--concept",
+                "topic",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+    action = json.loads(runner.invoke(cli, ["agent", "next"]).output)["data"]
+    assert action["phase"] == "question_mix_review"
+    approved = runner.invoke(
+        cli, ["question", "mix", "approve", "--decision", "keep", "--note", "Professor wants all MCQ"]
+    )
+    assert approved.exit_code == 0, approved.output
+    assert json.loads(runner.invoke(cli, ["agent", "next"]).output)["data"]["phase"] == "quality_control"
 
 
 def test_invalid_model_panel_is_atomic(tmp_path, monkeypatch):
@@ -305,3 +385,28 @@ def test_status_fetches_and_grade_normalizes_coop_results(tmp_path, monkeypatch)
     preserved = read_json(tmp_path / ".pruefung/gradebooks/quiz-1.gradebook.json")
     assert preserved["students"][0]["items"][0]["score"] == 1.5
     assert preserved["students"][0]["items"][0]["override"] is True
+    report = runner.invoke(cli, ["grade-report", "quiz-1", "--anonymize"])
+    assert report.exit_code == 0, report.output
+    report_data = json.loads(report.output)["data"]
+    assert report_data["students"][0]["student"] == "student-001"
+    assert "student@example.edu" not in report.output
+    assert report_data["items"][0]["mean_proportion"] == 0.75
+
+
+def test_open_deploy_and_qc_override(tmp_path, monkeypatch):
+    runner = make_question_project(tmp_path, monkeypatch)
+    question_path = tmp_path / ".pruefung/questions/q001.json"
+    question = read_json(question_path)
+    question["meta"].update(status="qc_failed", qc={"task_id": "qc_01", "passed": False, "notes": {}})
+    write_json(question_path, question)
+    override = runner.invoke(
+        cli,
+        ["qc", "override", "q001", "--decision", "pass", "--reason", "Professor reviewed the item"],
+    )
+    assert override.exit_code == 0, override.output
+    assert read_json(question_path)["meta"]["qc"]["notes"] == {}
+    runner.invoke(cli, ["exam", "create", "open-quiz"])
+    runner.invoke(cli, ["exam", "add", "open-quiz", "q001"])
+    dry_run = runner.invoke(cli, ["exam", "deploy", "open-quiz", "--open", "--dry-run"])
+    assert dry_run.exit_code == 0, dry_run.output
+    assert json.loads(dry_run.output)["data"]["enrollment_mode"] == "open"

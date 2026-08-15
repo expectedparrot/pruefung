@@ -32,7 +32,7 @@ deployment. Treat these as hard checkpoints:
 1. Review question wording, options, answer keys, rubrics, points, and coverage.
 2. Run and ingest QC, or explicitly tell the professor when draft questions
    would require `--allow-draft`.
-3. Attach and verify the roster.
+3. Ask whether distribution should use a roster or one shared open link.
 4. Run `exam preview` and `exam deploy --dry-run` before a real deployment.
 5. Obtain confirmation before the networked, one-shot `exam deploy` action.
 
@@ -45,7 +45,7 @@ Pruefung never runs model inference. It creates inspectable EDSL task packages:
 
 ```bash
 pruefung qc make
-python .pruefung/inference/qc_01/run.py
+python .pruefung/inference/qc_01/run.py --yes
 pruefung qc ingest qc_01
 ```
 
@@ -59,6 +59,16 @@ Use `pruefung qc report <task-id> -H` to investigate a failed panel. Never
 rewrite a result payload or reset an ingested task to manufacture a passing
 verdict. Model benchmarking against deployed exams is intentionally outside the
 v1 workflow; do not improvise it by running models against managed exam files.
+
+When three or more questions all use one format, `agent next` pauses for the
+professor to choose whether to keep it or add a mix. Record a deliberate choice
+with `pruefung question mix approve --decision keep --note "..."`; a bank change
+makes that approval stale. Preserve panel evidence when using the explicit
+`pruefung qc override <qid> --decision pass|fail --reason "..."` escape hatch.
+
+Use `exam deploy --open` for a shared URL without a roster. Use
+`pruefung grade-report <exam-id> --anonymize` for item and concept statistics
+without reading or exposing protected gradebook files.
 
 Coop calls for Humanize deployment and response retrieval are network I/O, not
 model inference. Let EDSL manage credentials. Never print, copy, store, or

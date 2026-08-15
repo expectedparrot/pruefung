@@ -29,6 +29,7 @@ from .core import (
     question_hash,
     read_json,
     score_checkbox,
+    slugify,
     state,
     validate_id,
     write_json,
@@ -124,6 +125,22 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "commands": ["pruefung schema question", "pruefung question add --help"],
         }
 
+    mix = Counter(question["meta"]["ptype"] for question in questions)
+    bank_hash = canonical_hash({question["meta"]["id"]: question["meta"]["content_hash"] for question in questions})
+    mix_review = read_json(state(root) / "question-mix-review.json", {})
+    if len(questions) >= 3 and len(mix) == 1 and mix_review.get("bank_hash") != bank_hash:
+        only_type = next(iter(mix))
+        return "question_mix_review", {
+            "kind": "organizer_input",
+            "reason": f"All {len(questions)} questions are {only_type}. Ask the professor whether they want a mix of question types before QC.",
+            "type_mix": dict(mix),
+            "question": "Keep this all-one-type bank, or revise it to include other formats such as true/false, checkbox, or free text?",
+            "commands": [
+                'pruefung question mix approve --decision keep --note "<professor rationale>"',
+                "pruefung question add --help",
+            ],
+        }
+
     pending = [task for task in tasks if task.get("status") == "pending"]
     if pending:
         task = pending[-1]
@@ -171,6 +188,7 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "question_ids": failed,
             "commands": [
                 *([f"pruefung qc report {qc_task} -H"] if qc_task else []),
+                f'pruefung qc override {failed[0]} --decision pass --reason "<professor rationale>"',
                 f"pruefung show {failed[0]} -H",
                 "pruefung question add --help",
             ],
@@ -195,8 +213,12 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
         if not exam.get("roster"):
             return "exam_roster", {
                 "kind": "organizer_input",
-                "reason": f"Exam {exam_id} needs a roster before deployment.",
-                "commands": [f"pruefung exam stats {exam_id} -H", f"pruefung exam roster {exam_id} <roster.csv>"],
+                "reason": f"Choose whether exam {exam_id} should use a roster or one shared open link.",
+                "commands": [
+                    f"pruefung exam stats {exam_id} -H",
+                    f"pruefung exam roster {exam_id} <roster.csv>",
+                    f"pruefung exam deploy {exam_id} --open --dry-run",
+                ],
             }
         return "exam_deploy", {
             "kind": "external_mutation",
@@ -214,7 +236,11 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
     return "responses_and_grading", {
         "kind": "monitoring",
         "reason": f"Exam {exam['exam_id']} is deployed.",
-        "commands": [f"pruefung status {exam['exam_id']}", f"pruefung grade {exam['exam_id']}"],
+        "commands": [
+            f"pruefung status {exam['exam_id']}",
+            f"pruefung grade {exam['exam_id']}",
+            f"pruefung grade-report {exam['exam_id']} -H",
+        ],
     }
 
 
@@ -263,6 +289,8 @@ def init_cmd(ctx: click.Context, course: str, human: bool) -> None:
         {
             "course": course,
             "created_at": now(),
+            "next_question_number": 1,
+            "retired_question_ids": [],
             "duration_minutes": {"mcq": 1.5, "true_false": 1.5, "checkbox": 2, "free_text": 5},
         },
     )
@@ -305,7 +333,8 @@ def source_add(
     root = setup(ctx, "source add", human)
     kind = kind or infer_kind(locator)
     default_name = Path(locator.rstrip("/")).stem or "source"
-    name = name or default_name
+    original_name = name or default_name
+    name = slugify(original_name)
     validate_id(name, r"[A-Za-z0-9_.-]+", "source name")
     manifest_path = state(root) / "materials/manifest.json"
     manifest = read_json(manifest_path, {"sources": {}})
@@ -327,7 +356,11 @@ def source_add(
         record.update(raw=str(target.relative_to(state(root))), raw_hash=canonical_hash(target.read_bytes().hex()))
     manifest["sources"][name] = record
     write_json(manifest_path, manifest)
-    emit(ctx, record)
+    emit(
+        ctx,
+        record,
+        warnings=[f"source name normalized from {original_name!r} to {name!r}"] if name != original_name else [],
+    )
 
 
 def render_source(root: Path, name: str, slice_spec: str | None) -> tuple[dict[str, Any], list[str]]:
@@ -359,9 +392,11 @@ def render_source(root: Path, name: str, slice_spec: str | None) -> tuple[dict[s
         "name": render_name,
         "slice": slice_spec,
         "path": str(target.relative_to(state(root))),
+        "absolute_path": str(target),
         "hash": canonical_hash(markdown),
         "chars": len(markdown),
         "rendered_at": now(),
+        "inspect_command": f"pruefung materials --show {render_name}",
     }
     source["renders"] = [x for x in source["renders"] if x["name"] != render_name] + [record]
     write_json(manifest_path, manifest)
@@ -387,7 +422,8 @@ def source_render(ctx: click.Context, name: str, slice_spec: str | None, human: 
 @click.pass_context
 def ingest_cmd(ctx: click.Context, path: Path, name: str | None, human: bool) -> None:
     root = setup(ctx, "ingest", human)
-    name = name or path.stem
+    original_name = name or path.stem
+    name = slugify(original_name)
     manifest_path = state(root) / "materials/manifest.json"
     manifest = read_json(manifest_path, {"sources": {}})
     if name in manifest["sources"]:
@@ -405,6 +441,8 @@ def ingest_cmd(ctx: click.Context, path: Path, name: str | None, human: bool) ->
     }
     write_json(manifest_path, manifest)
     record, warnings = render_source(root, name, None)
+    if name != original_name:
+        warnings.append(f"source name normalized from {original_name!r} to {name!r}")
     emit(ctx, {"source": name, "render": record}, warnings=warnings)
 
 
@@ -541,6 +579,34 @@ def question_group() -> None:
     """Create and modify EDSL-native questions."""
 
 
+@question_group.group("mix")
+def question_mix_group() -> None:
+    """Review the item bank's question-type composition."""
+
+
+@question_mix_group.command("approve")
+@click.option("--decision", type=click.Choice(["keep"]), required=True)
+@click.option("--note", required=True)
+@human_option
+@click.pass_context
+def question_mix_approve(ctx: click.Context, decision: str, note: str, human: bool) -> None:
+    root = setup(ctx, "question mix approve", human)
+    questions = [read_json(path) for path in question_files(root)]
+    if not questions:
+        raise ValidationError("the item bank is empty")
+    mix = Counter(question["meta"]["ptype"] for question in questions)
+    bank_hash = canonical_hash({question["meta"]["id"]: question["meta"]["content_hash"] for question in questions})
+    record = {
+        "decision": decision,
+        "note": note,
+        "type_mix": dict(mix),
+        "bank_hash": bank_hash,
+        "approved_at": now(),
+    }
+    write_json(state(root) / "question-mix-review.json", record)
+    emit(ctx, record)
+
+
 def parse_answer(ptype: str, answer: str | None, option_count: int) -> Any:
     if ptype == "free_text":
         return None
@@ -565,8 +631,11 @@ def parse_answer(ptype: str, answer: str | None, option_count: int) -> Any:
 @click.option("--name", required=True)
 @click.option("--text")
 @click.option("--text-file", type=click.Path(path_type=Path, exists=True))
-@click.option("--option", "options", multiple=True)
-@click.option("--answer")
+@click.option("--option", "options", multiple=True, help="Answer option; repeat in displayed order.")
+@click.option(
+    "--answer",
+    help="MCQ: zero-based option index; checkbox: comma-separated indices; true/false: true or false.",
+)
 @click.option("--points", type=float, required=True)
 @click.option("--concept", required=True)
 @click.option("--rubric")
@@ -618,15 +687,20 @@ def question_add(
         raise ValidationError("free_text requires --rubric or --rubric-file")
     parsed_answer = parse_answer(ptype, answer, len(options))
     edsl_dict = make_question(ptype, name, text, list(options)).to_dict()
+    config_path = state(root) / "config.json"
+    config = read_json(config_path, {})
+    retired = set(config.get("retired_question_ids", []))
     if qid is None:
-        used = {p.stem for p in question_files(root)}
-        number = 1
+        used = {p.stem for p in question_files(root)} | retired
+        number = max(1, int(config.get("next_question_number", 1)))
         while f"q{number:03d}" in used:
             number += 1
         qid = f"q{number:03d}"
     validate_id(qid, r"q\d{3,}", "question id")
     path = state(root) / "questions" / f"{qid}.json"
     old = read_json(path)
+    if not old and qid in retired:
+        raise ConflictError(f"question id {qid} was retired and cannot be reused")
     timestamp = now()
     meta: dict[str, Any] = {
         "id": qid,
@@ -658,6 +732,10 @@ def question_add(
     value = {"edsl": edsl_dict, "meta": meta}
     meta["content_hash"] = question_hash(value)
     write_json(path, value)
+    number = int(qid[1:])
+    if number >= int(config.get("next_question_number", 1)):
+        config["next_question_number"] = number + 1
+        write_json(config_path, config)
     emit(ctx, {"id": qid, "hash": meta["content_hash"], "edsl": edsl_dict, "replaced": old is not None})
 
 
@@ -705,6 +783,13 @@ def question_rm(ctx: click.Context, qid: str, human: bool) -> None:
     if not path.exists():
         raise ValidationError(f"unknown question: {qid}")
     path.unlink()
+    config_path = state(root) / "config.json"
+    config = read_json(config_path, {})
+    retired = set(config.get("retired_question_ids", []))
+    retired.add(qid)
+    config["retired_question_ids"] = sorted(retired)
+    config["next_question_number"] = max(int(config.get("next_question_number", 1)), int(qid[1:]) + 1)
+    write_json(config_path, config)
     emit(ctx, {"removed": qid})
 
 
@@ -1042,10 +1127,17 @@ def exam_preview(ctx: click.Context, exam_id: str, web: bool, human: bool) -> No
 @click.option("--dry-run", is_flag=True)
 @click.option("--no-shuffle", is_flag=True)
 @click.option("--allow-draft", is_flag=True)
+@click.option("--open", "open_link", is_flag=True, help="Publish one shared link without a roster.")
 @human_option
 @click.pass_context
 def exam_deploy(
-    ctx: click.Context, exam_id: str, dry_run: bool, no_shuffle: bool, allow_draft: bool, human: bool
+    ctx: click.Context,
+    exam_id: str,
+    dry_run: bool,
+    no_shuffle: bool,
+    allow_draft: bool,
+    open_link: bool,
+    human: bool,
 ) -> None:
     root = setup(ctx, "exam deploy", human)
     path, exam = load_exam(root, exam_id)
@@ -1053,8 +1145,8 @@ def exam_deploy(
     qs = [load_question(root, qid) for qid in exam["members"]]
     if not qs:
         raise ValidationError("exam has no questions")
-    if not exam.get("roster"):
-        raise ValidationError("exam has no roster")
+    if not exam.get("roster") and not open_link:
+        raise ValidationError("exam has no roster; use --open to publish a shared link")
     not_ready = [q["meta"]["id"] for q in qs if q["meta"]["status"] != "qc_passed"]
     if not_ready and not allow_draft:
         raise ConflictError(f"questions have not passed QC: {', '.join(not_ready)}")
@@ -1073,6 +1165,7 @@ def exam_deploy(
                 "questions": rows,
                 "survey": survey_dict,
                 "total_points": sum(q["frozen"]["meta"]["points"] for q in rows),
+                "enrollment_mode": "open" if open_link else "roster",
             },
             warnings=["draft questions allowed: " + ", ".join(not_ready)] if not_ready else [],
         )
@@ -1124,7 +1217,12 @@ def exam_deploy(
         deployed_at=now(),
         questions=rows,
         total_points=sum(q["frozen"]["meta"]["points"] for q in rows),
-        published={**published, "links": [], "identity_mode": "identity_question"},
+        published={
+            **published,
+            "links": [],
+            "identity_mode": "identity_question",
+            "enrollment_mode": "open" if open_link else "roster",
+        },
     )
     write_json(path.parent / "survey.edsl.json", survey_dict)
     write_json(path, exam)
@@ -1180,6 +1278,7 @@ def next_task(root: Path, prefix: str) -> str:
 def write_runner(directory: Path, kind: str, models: list[str]) -> None:
     # The runner intentionally contains no pruefung import, so it can be audited and moved.
     script = f"""# Portable pruefung {kind} runner; models: {", ".join(models)}; calls depend on task size.
+import argparse
 import json
 from pathlib import Path
 
@@ -1187,15 +1286,21 @@ from edsl import ModelList, ScenarioList, Survey
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--yes", action="store_true", help="Approve the paid model calls described by task.json")
+    args = parser.parse_args()
     here = Path(__file__).parent
     task = json.loads((here / "task.json").read_text())
+    if not args.yes:
+        print(json.dumps({{"ok": False, "requires_approval": True, "kind": task["kind"], "models": task["models"], "estimated_calls": task.get("estimated_calls"), "next_command": "python " + str(Path(__file__)) + " --yes"}}))
+        raise SystemExit(2)
     survey = Survey.from_dict(json.loads((here / "survey.edsl.json").read_text()))
     models = ModelList.from_dict(json.loads((here / "models.edsl.json").read_text()))
     if task["kind"] == "qc":
         results = survey.by(models).run()
         names = ["model.model"]
         for item in task["qc_items"]:
-            names.extend(["answer." + item["answer_name"], "answer." + item["flag_name"]])
+            names.extend(["answer." + item["answer_name"], "answer." + item["blocking_name"], "answer." + item["notes_name"]])
             if item["ptype"] == "free_text":
                 names.extend(["answer." + item["score_name"], "answer." + item["clarity_name"]])
         rows = results.select(*names).to_dicts()
@@ -1203,7 +1308,8 @@ def main():
         for item in task["qc_items"]:
             verdict = {{
                 "panel_answers": [row.get(item["answer_name"]) for row in rows],
-                "flags": [row.get(item["flag_name"]) for row in rows],
+                "blocking": [row.get(item["blocking_name"]) for row in rows],
+                "notes": [row.get(item["notes_name"]) for row in rows],
                 "models": [row.get("model") for row in rows],
             }}
             if item["ptype"] == "free_text":
@@ -1271,6 +1377,7 @@ def make_task(
     task_id = next_task(root, prefix)
     directory = state(root) / "inference" / task_id
     directory.mkdir()
+    estimated_calls = len(models) * max(1, len(scenarios)) * len(survey.questions)
     task = {
         "task_id": task_id,
         "kind": kind,
@@ -1278,6 +1385,7 @@ def make_task(
         "created_at": now(),
         "status": "pending",
         "models": models,
+        "estimated_calls": estimated_calls,
         **(task_extra or {}),
     }
     write_json(directory / "task.json", task)
@@ -1329,22 +1437,29 @@ def qc_make(ctx: click.Context, only: str | None, models: str, force: bool, huma
             material_hashes[f"material:{name}"] = render["hash"]
             material_text.append((state(root) / render["path"]).read_text(encoding="utf-8"))
         context = "\n\nCourse material excerpts:\n" + "\n\n".join(material_text) if material_text else ""
-        flag_name = f"qc_flag_{qid}"
+        blocking_name = f"qc_blocking_{qid}"
+        notes_name = f"qc_notes_{qid}"
         rendered_options = "\n".join(
             f"[{index}] {option}" for index, option in enumerate(q["edsl"].get("question_options", []))
         )
-        flag_text = (
+        review_text = (
             f"Review this question:\n{q['edsl']['question_text']}\n{rendered_options}\n\n"
-            "Reply exactly 'none' if it is clear, requires the intended course knowledge, "
-            "and has no likely miskey. Otherwise begin 'BLOCKING:' and briefly identify ambiguity, answer cues, or the likely error."
+            "Does this question have a blocking defect such as ambiguity, answer cues, a likely miskey, or reliance on knowledge outside the supplied course material?"
             + context
         )
-        survey_questions.append(edsl.QuestionFreeText(question_name=flag_name, question_text=flag_text))
+        survey_questions.append(edsl.QuestionYesNo(question_name=blocking_name, question_text=review_text))
+        survey_questions.append(
+            edsl.QuestionFreeText(
+                question_name=notes_name,
+                question_text="Briefly explain your blocking-defect decision. Reply 'none' when there is no defect.",
+            )
+        )
         item = {
             "qid": qid,
             "ptype": q["meta"]["ptype"],
             "answer_name": q["edsl"]["question_name"],
-            "flag_name": flag_name,
+            "blocking_name": blocking_name,
+            "notes_name": notes_name,
         }
         if q["meta"]["ptype"] == "free_text":
             score_name = f"qc_score_{qid}"
@@ -1382,7 +1497,8 @@ def qc_make(ctx: click.Context, only: str | None, models: str, force: bool, huma
             "models": model_names,
             "question_count": len(questions),
             "estimated_calls": len(model_names) * len(survey_questions),
-            "run": f"python .pruefung/inference/{task_id}/run.py",
+            "run": f"python .pruefung/inference/{task_id}/run.py --yes",
+            "requires_approval": True,
         },
     )
 
@@ -1472,30 +1588,30 @@ def qc_ingest(ctx: click.Context, task_ref: str, human: bool) -> None:
         if (
             not isinstance(verdict, dict)
             or not isinstance(verdict.get("panel_answers"), list)
-            or not isinstance(verdict.get("flags"), list)
+            or not isinstance(verdict.get("blocking"), list)
         ):
-            raise ValidationError(f"QC verdict for {qid} requires panel_answers and flags arrays")
-        passed = verdict.get("passed")
-        if passed is None:
-            answers = [
-                normalize_answer(value, q["meta"]["ptype"], q["edsl"].get("question_options", []))
-                for value in verdict["panel_answers"]
-            ]
-            flags = verdict.get("flags", [])
-            if q["meta"]["ptype"] == "free_text":
-                scores = [float(value) for value in verdict.get("rubric_scores", []) if value is not None]
-                clarity = [normalize_answer(value, "true_false", []) for value in verdict.get("rubric_clear", [])]
-                passed = bool(
-                    scores
-                    and statistics.mean(scores) >= (2 * q["meta"]["points"] / 3)
-                    and clarity
-                    and all(value is True for value in clarity)
-                )
-            else:
-                matches = sum(a == q["meta"].get("answer") for a in answers)
-                blocking = [value for value in flags if str(value or "").strip().lower().startswith("blocking:")]
-                passed = matches >= 2 and not blocking
-            verdict["normalized_answers"] = answers
+            raise ValidationError(f"QC verdict for {qid} requires panel_answers and blocking arrays")
+        answers = [
+            normalize_answer(value, q["meta"]["ptype"], q["edsl"].get("question_options", []))
+            for value in verdict["panel_answers"]
+        ]
+        blocking = [normalize_answer(value, "true_false", []) for value in verdict.get("blocking", [])]
+        if q["meta"]["ptype"] == "free_text":
+            scores = [float(value) for value in verdict.get("rubric_scores", []) if value is not None]
+            clarity = [normalize_answer(value, "true_false", []) for value in verdict.get("rubric_clear", [])]
+            passed = bool(
+                scores
+                and statistics.mean(scores) >= (2 * q["meta"]["points"] / 3)
+                and clarity
+                and all(value is True for value in clarity)
+                and blocking
+                and not any(value is True for value in blocking)
+            )
+        else:
+            matches = sum(a == q["meta"].get("answer") for a in answers)
+            passed = matches >= 2 and blocking and not any(value is True for value in blocking)
+        verdict["normalized_answers"] = answers
+        verdict["normalized_blocking"] = blocking
         q["meta"].update(
             status="qc_passed" if passed else "qc_failed",
             qc={"task_id": task["task_id"], "passed": bool(passed), "notes": verdict},
@@ -1537,10 +1653,76 @@ def qc_show(ctx: click.Context, task_ref: str, human: bool) -> None:
 
 @qc_group.command("report")
 @click.argument("task_ref")
+@click.option("--question", "question_ids", multiple=True, help="Limit the report to a question ID.")
+@click.option("--status", type=click.Choice(["draft", "qc_passed", "qc_failed", "deployed"]))
+@click.option("--blocking-only", is_flag=True, help="Show only questions with a blocking panel vote.")
 @human_option
 @click.pass_context
-def qc_report(ctx: click.Context, task_ref: str, human: bool) -> None:
-    ctx.invoke(qc_show, task_ref=task_ref, human=human)
+def qc_report(
+    ctx: click.Context,
+    task_ref: str,
+    question_ids: tuple[str, ...],
+    status: str | None,
+    blocking_only: bool,
+    human: bool,
+) -> None:
+    root = setup(ctx, "qc report", human)
+    directory = state(root) / "inference" / task_ref
+    task = read_json(directory / "task.json")
+    if not task or task.get("kind") != "qc":
+        raise ValidationError(f"unknown QC task: {task_ref}")
+    verdicts = (read_json(directory / "result.json") or {}).get("payload", {}).get("questions", {})
+    rows = []
+    for qid in [key for key in task["input_hashes"] if key.startswith("q")]:
+        question = load_question(root, qid)
+        verdict = verdicts.get(qid, {})
+        normalized_blocking = [normalize_answer(value, "true_false", []) for value in verdict.get("blocking", [])]
+        row = {
+            "id": qid,
+            "status": question["meta"]["status"],
+            "expected": question["meta"].get("answer"),
+            "panel_answers": verdict.get("panel_answers", []),
+            "blocking": normalized_blocking,
+            "notes": verdict.get("notes", []),
+            "qc": question["meta"].get("qc"),
+        }
+        if question_ids and qid not in question_ids:
+            continue
+        if status and row["status"] != status:
+            continue
+        if blocking_only and not any(value is True for value in normalized_blocking):
+            continue
+        rows.append(row)
+    if human:
+        for row in rows:
+            click.echo(f"{row['id']}: {row['status']} (expected: {row['expected']})")
+            click.echo(f"  answers: {row['panel_answers']}")
+            click.echo(f"  blocking: {row['blocking']}")
+            click.echo(f"  notes: {row['notes']}")
+        return
+    emit(ctx, {"task_id": task_ref, "questions": rows})
+
+
+@qc_group.command("override")
+@click.argument("qid")
+@click.option("--decision", type=click.Choice(["pass", "fail"]), required=True)
+@click.option("--reason", required=True, help="Professor or reviewer rationale.")
+@click.option("--reviewer", default="professor", show_default=True)
+@human_option
+@click.pass_context
+def qc_override(ctx: click.Context, qid: str, decision: str, reason: str, reviewer: str, human: bool) -> None:
+    root = setup(ctx, "qc override", human)
+    question = load_question(root, qid)
+    if question["meta"]["status"] == "deployed":
+        raise ConflictError("cannot override QC after deployment")
+    override = {"passed": decision == "pass", "reason": reason, "reviewer": reviewer, "at": now()}
+    qc = question["meta"].setdefault("qc", {})
+    qc.setdefault("overrides", []).append(override)
+    qc["override"] = override
+    qc["passed"] = override["passed"]
+    question["meta"].update(status="qc_passed" if override["passed"] else "qc_failed", updated_at=now())
+    write_json(state(root) / "questions" / f"{qid}.json", question)
+    emit(ctx, {"id": qid, "status": question["meta"]["status"], "override": override})
 
 
 @cli.command("inference")
@@ -1691,6 +1873,95 @@ def grade_cmd(ctx: click.Context, exam_id: str, rescore: bool, human: bool) -> N
             "next_commands": [f"pruefung grade-make {exam_id}"] if pending else [],
         },
     )
+
+
+def correlation(xs: list[float], ys: list[float]) -> float | None:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    xbar, ybar = statistics.mean(xs), statistics.mean(ys)
+    numerator = sum((x - xbar) * (y - ybar) for x, y in zip(xs, ys))
+    denominator = (sum((x - xbar) ** 2 for x in xs) * sum((y - ybar) ** 2 for y in ys)) ** 0.5
+    return numerator / denominator if denominator else None
+
+
+def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize: bool) -> dict[str, Any]:
+    students = gradebook.get("students", [])
+    scores = [float(student["score"]) for student in students]
+    public_students = []
+    for index, student in enumerate(students, start=1):
+        public_students.append(
+            {
+                "student": f"student-{index:03d}" if anonymize else student["email"],
+                "name": "" if anonymize else student.get("name", ""),
+                "score": student["score"],
+                "total_points": student["total_points"],
+            }
+        )
+    items = []
+    concepts: dict[str, list[float]] = defaultdict(list)
+    for row in exam.get("questions", []):
+        qid, qname, frozen = row["bank_id"], row["question_name"], row["frozen"]
+        student_items = [next((item for item in s["items"] if item["question_name"] == qname), {}) for s in students]
+        ratios = [float(item.get("score") or 0) / float(item.get("max_points") or 1) for item in student_items]
+        concepts[frozen["meta"]["concept"]].extend(ratios)
+        answer_counts = (
+            Counter(str(item.get("answer")) for item in student_items)
+            if frozen["meta"]["ptype"] != "free_text"
+            else None
+        )
+        items.append(
+            {
+                "id": qid,
+                "question_name": qname,
+                "concept": frozen["meta"]["concept"],
+                "type": frozen["meta"]["ptype"],
+                "mean_proportion": statistics.mean(ratios) if ratios else None,
+                "score_total_correlation": correlation(ratios, scores),
+                "answer_counts": dict(answer_counts) if answer_counts is not None else None,
+            }
+        )
+    return {
+        "exam_id": exam["exam_id"],
+        "anonymized": anonymize,
+        "summary": {
+            "count": len(scores),
+            "mean": statistics.mean(scores) if scores else None,
+            "median": statistics.median(scores) if scores else None,
+            "range": [min(scores), max(scores)] if scores else None,
+        },
+        "students": public_students,
+        "items": items,
+        "concepts": {key: {"mean_proportion": statistics.mean(values)} for key, values in concepts.items()},
+    }
+
+
+@cli.command("grade-report")
+@click.argument("exam_id")
+@click.option("--anonymize", is_flag=True, help="Replace student identities with stable labels.")
+@click.option("--student", help="Limit the student table to one email address.")
+@human_option
+@click.pass_context
+def grade_report_cmd(ctx: click.Context, exam_id: str, anonymize: bool, student: str | None, human: bool) -> None:
+    root = setup(ctx, "grade report", human)
+    _, exam = load_exam(root, exam_id)
+    gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
+    if not gradebook:
+        raise ValidationError(f"run `pruefung grade {exam_id}` first")
+    if student:
+        selected = [row for row in gradebook.get("students", []) if row["email"].lower() == student.lower()]
+        if not selected:
+            raise ValidationError(f"student not found in gradebook: {student}")
+        gradebook = {**gradebook, "students": selected}
+    report = grade_report_data(exam, gradebook, anonymize)
+    if human:
+        click.echo(f"{exam_id}: {report['summary']['count']} graded response(s)")
+        click.echo(f"Mean: {report['summary']['mean']}  Median: {report['summary']['median']}")
+        for item in report["items"]:
+            click.echo(
+                f"{item['id']} ({item['concept']}): mean={item['mean_proportion']} correlation={item['score_total_correlation']}"
+            )
+        return
+    emit(ctx, report)
 
 
 @cli.command("status")
