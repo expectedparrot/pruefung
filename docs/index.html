@@ -30,7 +30,7 @@
     <h1>Build exams you can inspect.</h1>
     <p class="dek">Pruefung helps a professor and a coding agent turn course materials into a durable item bank, check questions with an independent panel, field a frozen EDSL survey, and grade responses without hiding the answer key inside the survey.</p>
     <div class="cta"><a class="primary" href="https://github.com/expectedparrot/pruefung">View on GitHub →</a><a class="secondary" href="https://docs.expectedparrot.com/">Explore EDSL</a></div>
-    <span class="tag">Version 0.1.4 · Python 3.10+</span>
+    <span class="tag">Version 0.1.5 · Python 3.10+</span>
   </header>
 
   <section id="why"><h2>What Pruefung does</h2>
@@ -117,7 +117,7 @@ python .pruefung/inference/qc_01/run.py --yes
 
 pruefung qc ingest qc_01
 pruefung qc report qc_01 -H
-pruefung qc override q001 --decision pass --reason "Professor reviewed the panel concern"
+pruefung qc override q001 --decision pass --reason "Professor reviewed the concern" --professor-approved
 pruefung ls --status qc_passed</code></pre>
     <p>The panel answers each item without seeing its key and flags ambiguity, cues, or a likely miskey. Results can be ingested only while their recorded content hashes still match the bank.</p>
   </section>

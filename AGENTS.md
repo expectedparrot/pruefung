@@ -91,7 +91,9 @@ When three or more questions all use one format, `agent next` pauses for the
 professor to choose whether to keep it or add a mix. Record a deliberate choice
 with `pruefung question mix approve --decision keep --note "..."`; a bank change
 makes that approval stale. Preserve panel evidence when using the explicit
-`pruefung qc override <qid> --decision pass|fail --reason "..."` escape hatch.
+`pruefung qc override <qid> --decision pass|fail --reason "..."
+--professor-approved` escape hatch. Never use that confirmation flag unless the
+professor explicitly made the decision in the conversation.
 
 Use `exam deploy --open` for a shared URL without a roster. Use
 `pruefung grade-report <exam-id> --anonymize` for item and concept statistics

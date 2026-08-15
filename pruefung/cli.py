@@ -194,7 +194,7 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "question_ids": failed,
             "commands": [
                 *([f"pruefung qc report {qc_task} -H"] if qc_task else []),
-                f'pruefung qc override {failed[0]} --decision pass --reason "<professor rationale>"',
+                f'pruefung qc override {failed[0]} --decision pass --reason "<professor rationale>" --professor-approved',
                 f"pruefung show {failed[0]} -H",
                 "pruefung question add --help",
             ],
@@ -1349,21 +1349,20 @@ def main():
         results = survey.by(models).run()
         names = ["model.model"]
         for item in task["qc_items"]:
-            names.extend(["answer." + item["answer_name"], "answer." + item["blocking_name"], "answer." + item["notes_name"]])
-            if item["ptype"] == "free_text":
-                names.extend(["answer." + item["score_name"], "answer." + item["clarity_name"]])
+            names.extend(["answer." + item["answer_name"], "answer." + item["review_name"]])
         rows = results.select(*names).to_dicts()
         questions = {{}}
         for item in task["qc_items"]:
+            reviews = [row.get(item["review_name"]) or {{}} for row in rows]
             verdict = {{
                 "panel_answers": [row.get(item["answer_name"]) for row in rows],
-                "blocking": [row.get(item["blocking_name"]) for row in rows],
-                "notes": [row.get(item["notes_name"]) for row in rows],
+                "blocking": [review.get("blocking") for review in reviews],
+                "notes": [review.get("notes") for review in reviews],
                 "models": [row.get("model") for row in rows],
             }}
             if item["ptype"] == "free_text":
-                verdict["rubric_scores"] = [row.get(item["score_name"]) for row in rows]
-                verdict["rubric_clear"] = [row.get(item["clarity_name"]) for row in rows]
+                verdict["rubric_scores"] = [review.get("rubric_score") for review in reviews]
+                verdict["rubric_clear"] = [review.get("rubric_clear") for review in reviews]
             questions[item["qid"]] = verdict
         payload = {{"questions": questions}}
     else:
@@ -1486,8 +1485,7 @@ def qc_make(ctx: click.Context, only: str | None, models: str, force: bool, huma
             material_hashes[f"material:{name}"] = render["hash"]
             material_text.append((state(root) / render["path"]).read_text(encoding="utf-8"))
         context = "\n\nCourse material excerpts:\n" + "\n\n".join(material_text) if material_text else ""
-        blocking_name = f"qc_blocking_{qid}"
-        notes_name = f"qc_notes_{qid}"
+        review_name = f"qc_review_{qid}"
         rendered_options = "\n".join(
             f"[{index}] {option}" for index, option in enumerate(q["edsl"].get("question_options", []))
         )
@@ -1496,41 +1494,36 @@ def qc_make(ctx: click.Context, only: str | None, models: str, force: bool, huma
             "Does this question have a blocking defect such as ambiguity, answer cues, a likely miskey, or reliance on knowledge outside the supplied course material?"
             + context
         )
-        survey_questions.append(edsl.QuestionYesNo(question_name=blocking_name, question_text=review_text))
-        survey_questions.append(
-            edsl.QuestionFreeText(
-                question_name=notes_name,
-                question_text="Briefly explain your blocking-defect decision. Reply 'none' when there is no defect.",
-            )
-        )
+        answer_keys = ["blocking", "notes"]
+        value_types = ["bool", "str"]
+        value_descriptions = [
+            "True only when a specific defect prevents fair use of the question; otherwise false.",
+            "A brief, question-specific explanation of the decision.",
+        ]
         item = {
             "qid": qid,
             "ptype": q["meta"]["ptype"],
             "answer_name": q["edsl"]["question_name"],
-            "blocking_name": blocking_name,
-            "notes_name": notes_name,
+            "review_name": review_name,
         }
         if q["meta"]["ptype"] == "free_text":
-            score_name = f"qc_score_{qid}"
-            clarity_name = f"qc_clarity_{qid}"
-            survey_questions.append(
-                edsl.QuestionNumerical(
-                    question_name=score_name,
-                    question_text=(
-                        f"Score your answer to {q['edsl']['question_name']} from 0 to {q['meta']['points']} using this rubric: "
-                        + q["meta"]["rubric"]
-                    ),
-                    min_value=0,
-                    max_value=q["meta"]["points"],
-                )
+            answer_keys.extend(["rubric_score", "rubric_clear"])
+            value_types.extend(["float", "bool"])
+            value_descriptions.extend(
+                [
+                    f"Score your answer from 0 to {q['meta']['points']} using this rubric: {q['meta']['rubric']}",
+                    "True when the rubric is unambiguous and covers answers that deserve credit.",
+                ]
             )
-            survey_questions.append(
-                edsl.QuestionYesNo(
-                    question_name=clarity_name,
-                    question_text="Is the rubric unambiguous and does it cover answers that deserve credit?",
-                )
+        survey_questions.append(
+            edsl.QuestionDict(
+                question_name=review_name,
+                question_text=review_text,
+                answer_keys=answer_keys,
+                value_types=value_types,
+                value_descriptions=value_descriptions,
             )
-            item.update(score_name=score_name, clarity_name=clarity_name)
+        )
         qc_items.append(item)
     survey = edsl.Survey(survey_questions)
     hashes = {q["meta"]["id"]: q["meta"]["content_hash"] for q in questions} | material_hashes
@@ -1579,7 +1572,11 @@ def validate_result(root: Path, task_ref: str, kind: str) -> tuple[Path, dict[st
         elif object_id.startswith("material:"):
             current = material_hashes.get(object_id)
         elif object_id.startswith("response:") and task.get("exam_id"):
-            _, email, question_name = object_id.split(":", 2)
+            response_input = task.get("response_inputs", {}).get(object_id)
+            if response_input:
+                email, question_name = response_input["email"], response_input["question_name"]
+            else:
+                _, email, question_name = object_id.split(":", 2)
             _, exam = load_exam(root, task["exam_id"])
             response = next(
                 (
@@ -1608,6 +1605,8 @@ def validate_result(root: Path, task_ref: str, kind: str) -> tuple[Path, dict[st
         if current != expected:
             changed.append(object_id)
     if changed:
+        task.update(status="stale", stale_at=now(), changed_objects=changed)
+        write_json(task_path, task)
         raise ConflictError(f"stale result; changed objects: {', '.join(changed)}")
     return task_path, task, result
 
@@ -1645,6 +1644,8 @@ def qc_ingest(ctx: click.Context, task_ref: str, human: bool) -> None:
             for value in verdict["panel_answers"]
         ]
         blocking = [normalize_answer(value, "true_false", []) for value in verdict.get("blocking", [])]
+        blocking_votes = sum(value is True for value in blocking)
+        blocking_majority = blocking_votes > len(blocking) / 2
         if q["meta"]["ptype"] == "free_text":
             scores = [float(value) for value in verdict.get("rubric_scores", []) if value is not None]
             clarity = [normalize_answer(value, "true_false", []) for value in verdict.get("rubric_clear", [])]
@@ -1652,15 +1653,18 @@ def qc_ingest(ctx: click.Context, task_ref: str, human: bool) -> None:
                 scores
                 and statistics.mean(scores) >= (2 * q["meta"]["points"] / 3)
                 and clarity
-                and all(value is True for value in clarity)
+                and sum(value is True for value in clarity) > len(clarity) / 2
                 and blocking
-                and not any(value is True for value in blocking)
+                and not blocking_majority
             )
         else:
             matches = sum(a == q["meta"].get("answer") for a in answers)
-            passed = matches >= 2 and blocking and not any(value is True for value in blocking)
+            answer_majority = matches > len(answers) / 2
+            passed = answer_majority and blocking and not blocking_majority
         verdict["normalized_answers"] = answers
         verdict["normalized_blocking"] = blocking
+        verdict["blocking_votes"] = blocking_votes
+        verdict["blocking_majority"] = blocking_majority
         q["meta"].update(
             status="qc_passed" if passed else "qc_failed",
             qc={"task_id": task["task_id"], "passed": bool(passed), "notes": verdict},
@@ -1757,14 +1761,29 @@ def qc_report(
 @click.option("--decision", type=click.Choice(["pass", "fail"]), required=True)
 @click.option("--reason", required=True, help="Professor or reviewer rationale.")
 @click.option("--reviewer", default="professor", show_default=True)
+@click.option("--professor-approved", is_flag=True, required=True, help="Confirm explicit professor approval.")
 @human_option
 @click.pass_context
-def qc_override(ctx: click.Context, qid: str, decision: str, reason: str, reviewer: str, human: bool) -> None:
+def qc_override(
+    ctx: click.Context,
+    qid: str,
+    decision: str,
+    reason: str,
+    reviewer: str,
+    professor_approved: bool,
+    human: bool,
+) -> None:
     root = setup(ctx, "qc override", human)
     question = load_question(root, qid)
     if question["meta"]["status"] == "deployed":
         raise ConflictError("cannot override QC after deployment")
-    override = {"passed": decision == "pass", "reason": reason, "reviewer": reviewer, "at": now()}
+    override = {
+        "passed": decision == "pass",
+        "reason": reason,
+        "reviewer": reviewer,
+        "professor_approved": professor_approved,
+        "at": now(),
+    }
     qc = question["meta"].setdefault("qc", {})
     qc.setdefault("overrides", []).append(override)
     qc["override"] = override
@@ -2120,14 +2139,16 @@ def status_cmd(ctx: click.Context, exam_id: str, human: bool) -> None:
         if x.get("email") or x.get("identifier")
     }
     roster = {x["email"].lower() for x in exam.get("roster", [])}
+    open_enrollment = exam.get("published", {}).get("enrollment_mode") == "open"
     emit(
         ctx,
         {
             "exam_id": exam_id,
-            "responded": len(responded & roster),
+            "responded": len(responded) if open_enrollment else len(responded & roster),
             "roster": len(roster),
-            "missing": sorted(roster - responded),
-            "unmatched": sorted(responded - roster),
+            "missing": [] if open_enrollment else sorted(roster - responded),
+            "unmatched": [] if open_enrollment else sorted(responded - roster),
+            "enrollment_mode": "open" if open_enrollment else "roster",
         },
     )
 
@@ -2142,20 +2163,22 @@ def grade_make_cmd(ctx: click.Context, exam_id: str, models: str, force: bool, h
     root = setup(ctx, "grade make", human)
     _, exam = load_exam(root, exam_id)
     responses = sync_responses(state(root) / "exams" / exam_id, exam)
-    scenarios, hashes = [], {}
+    scenarios, hashes, response_inputs = [], {}, {}
     for response in responses:
         answer_id = response.get("email") or response.get("identifier", "")
         for row in exam.get("questions", []):
             q = row["frozen"]
             if q["meta"]["ptype"] == "free_text":
                 aid = f"{answer_id}:{row['question_name']}"
-                hashes[f"response:{aid}"] = canonical_hash(
+                object_id = f"response:{canonical_hash(aid)[:20]}"
+                hashes[object_id] = canonical_hash(
                     {
                         "question": q["edsl"],
                         "rubric": q["meta"]["rubric"],
                         "answer": response_answer(response, row["question_name"]),
                     }
                 )
+                response_inputs[object_id] = {"email": answer_id, "question_name": row["question_name"]}
                 scenarios.append(
                     {
                         "answer_id": aid,
@@ -2190,7 +2213,7 @@ def grade_make_cmd(ctx: click.Context, exam_id: str, models: str, force: bool, h
         [name.strip() for name in models.split(",") if name.strip()],
         survey,
         force,
-        task_extra={"exam_id": exam_id},
+        task_extra={"exam_id": exam_id, "response_inputs": response_inputs},
     )
     emit(
         ctx,

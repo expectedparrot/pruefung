@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from pruefung.cli import cli
 from pruefung.core import question_hash, read_json, score_checkbox, write_json
+from pruefung.integrations import normalize_response
 
 
 def invoke(runner, root, args):
@@ -173,11 +174,12 @@ def test_qc_contract_rejects_raw_results_then_ingests_normalized(tmp_path, monke
     task = read_json(task_dir / "task.json")
     survey = read_json(task_dir / "survey.edsl.json")
     names = [question["question_name"] for question in survey["questions"]]
-    assert "topic_item" in names and "qc_blocking_q001" in names and "qc_notes_q001" in names
-    flag = next(question for question in survey["questions"] if question["question_name"] == "qc_blocking_q001")
+    assert "topic_item" in names and "qc_review_q001" in names
+    flag = next(question for question in survey["questions"] if question["question_name"] == "qc_review_q001")
     assert "Choose beta" in flag["question_text"]
     assert "The correct answer is beta" in flag["question_text"]
     assert "material:lecture" in task["input_hashes"]
+    assert json.loads(made.output)["data"]["estimated_calls"] == 2
     assert "raw_results" not in (task_dir / "run.py").read_text()
     py_compile.compile(str(task_dir / "run.py"), doraise=True)
     approval = subprocess.run(
@@ -204,8 +206,8 @@ def test_qc_contract_rejects_raw_results_then_ingests_normalized(tmp_path, monke
         "questions": {
             "q001": {
                 "panel_answers": [1, "beta", 1],
-                "blocking": [False, "No", False],
-                "notes": ["none", "none", "Looks fine"],
+                "blocking": [True, "No", False],
+                "notes": ["Possible issue", "none", "Looks fine"],
                 "models": ["gpt-4o", "gpt-4.1-mini", "gemini-2.5-flash"],
             }
         }
@@ -294,6 +296,35 @@ def test_invalid_model_panel_is_atomic(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "distinct model names" in str(result.exception)
     assert not list((tmp_path / ".pruefung/inference").iterdir())
+
+
+def test_stale_result_retires_task_for_safe_replacement(tmp_path, monkeypatch):
+    runner = make_question_project(tmp_path, monkeypatch)
+    assert runner.invoke(cli, ["qc", "make", "--models", "test"]).exit_code == 0
+    task_dir = tmp_path / ".pruefung/inference/qc_01"
+    task = read_json(task_dir / "task.json")
+    write_json(
+        task_dir / "result.json",
+        {
+            "task_id": "qc_01",
+            "kind": "qc",
+            "input_hashes": task["input_hashes"],
+            "created_at": task["created_at"],
+            "payload": {"questions": {}},
+        },
+    )
+    question_path = tmp_path / ".pruefung/questions/q001.json"
+    question = read_json(question_path)
+    question["meta"]["content_hash"] = "changed"
+    write_json(question_path, question)
+    stale = runner.invoke(cli, ["qc", "ingest", "qc_01"])
+    assert stale.exit_code == 1
+    retired = read_json(task_dir / "task.json")
+    assert retired["status"] == "stale"
+    assert retired["changed_objects"] == ["q001"]
+    replacement = runner.invoke(cli, ["qc", "make", "--models", "test"])
+    assert replacement.exit_code == 0, replacement.output
+    assert json.loads(replacement.output)["data"]["task_id"] == "qc_02"
 
 
 def prepare_exam(tmp_path, monkeypatch):
@@ -408,7 +439,16 @@ def test_open_deploy_and_qc_override(tmp_path, monkeypatch):
     write_json(question_path, question)
     override = runner.invoke(
         cli,
-        ["qc", "override", "q001", "--decision", "pass", "--reason", "Professor reviewed the item"],
+        [
+            "qc",
+            "override",
+            "q001",
+            "--decision",
+            "pass",
+            "--reason",
+            "Professor reviewed the item",
+            "--professor-approved",
+        ],
     )
     assert override.exit_code == 0, override.output
     assert read_json(question_path)["meta"]["qc"]["notes"] == {}
@@ -417,6 +457,46 @@ def test_open_deploy_and_qc_override(tmp_path, monkeypatch):
     dry_run = runner.invoke(cli, ["exam", "deploy", "open-quiz", "--open", "--dry-run"])
     assert dry_run.exit_code == 0, dry_run.output
     assert json.loads(dry_run.output)["data"]["enrollment_mode"] == "open"
+    monkeypatch.setattr("edsl.Survey.humanize", lambda self, **kwargs: {"human_survey_uuid": "open-survey"})
+    assert runner.invoke(cli, ["exam", "deploy", "open-quiz", "--open", "--no-shuffle"]).exit_code == 0
+
+    class OpenCoop:
+        def get_human_survey_responses(self, uuid):
+            return [
+                {
+                    "answer": {
+                        "pruefung_respondent_email": {
+                            "answer": "student@example.edu",
+                            "answered_at": "2026-08-15T13:55:32Z",
+                        },
+                        "q1_topic": {"answer": "beta"},
+                    }
+                }
+            ]
+
+    monkeypatch.setattr("pruefung.integrations.get_coop", lambda: OpenCoop())
+    status = json.loads(runner.invoke(cli, ["status", "open-quiz"]).output)["data"]
+    assert status["responded"] == 1
+    assert status["unmatched"] == []
+    assert status["enrollment_mode"] == "open"
+
+
+def test_real_humanize_answer_cells_are_unwrapped():
+    response = normalize_response(
+        {
+            "answer": {
+                "pruefung_respondent_email": {
+                    "answer": "JJHorton@MIT.edu",
+                    "comment": None,
+                    "answered_at": "2026-08-15T13:55:32Z",
+                },
+                "q1_rag": {"answer": "A grounded answer", "comment": None},
+            }
+        }
+    )
+    assert response["email"] == "jjhorton@mit.edu"
+    assert response["answers"]["q1_rag"] == "A grounded answer"
+    assert response["submitted_at"] == "2026-08-15T13:55:32Z"
 
 
 def test_post_exam_html_and_llm_rubric_grading(tmp_path, monkeypatch):

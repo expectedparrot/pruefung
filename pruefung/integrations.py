@@ -85,14 +85,27 @@ def result_rows(result: Any) -> list[dict[str, Any]]:
 
 
 def normalize_response(row: dict[str, Any]) -> dict[str, Any]:
+    def answer_value(value: Any) -> Any:
+        if isinstance(value, dict) and "answer" in value:
+            return answer_value(value["answer"])
+        return value
+
     answers: dict[str, Any] = {}
     metadata: dict[str, Any] = {}
     nested_answers = row.get("answers") or row.get("answer")
+    answer_metadata = next(
+        (
+            value
+            for value in (nested_answers.values() if isinstance(nested_answers, dict) else [])
+            if isinstance(value, dict) and (value.get("answered_at") or value.get("submitted_at"))
+        ),
+        {},
+    )
     if isinstance(nested_answers, dict):
-        answers.update(nested_answers)
+        answers.update({key: answer_value(value) for key, value in nested_answers.items()})
     for key, value in row.items():
         if key.startswith("answer."):
-            answers[key.split(".", 1)[1]] = value
+            answers[key.split(".", 1)[1]] = answer_value(value)
         elif key.startswith("scenario."):
             metadata[key.split(".", 1)[1]] = value
     email = (
@@ -118,16 +131,28 @@ def normalize_response(row: dict[str, Any]) -> dict[str, Any]:
         "email": email,
         "name": str(row.get("name") or metadata.get("name") or ""),
         "answers": answers,
-        "submitted_at": row.get("submitted_at") or metadata.get("submitted_at") or metadata.get("created_at"),
+        "submitted_at": (
+            row.get("submitted_at")
+            or metadata.get("submitted_at")
+            or metadata.get("created_at")
+            or answer_metadata.get("answered_at")
+            or answer_metadata.get("submitted_at")
+        ),
     }
 
 
 def merge_responses(path: Path, incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    existing = read_json(path, [])
+    existing = [normalize_response(row) for row in read_json(path, [])]
     by_id = {str(row.get("response_id") or canonical_hash(row)): row for row in existing}
     for row in incoming:
         by_id[row["response_id"]] = row
-    merged = sorted(by_id.values(), key=lambda row: (str(row.get("submitted_at") or ""), row["response_id"]))
+    by_submission: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in by_id.values():
+        key = (row.get("email", ""), str(row.get("submitted_at") or row["response_id"]))
+        previous = by_submission.get(key)
+        if previous is None or len(str(row.get("email", ""))) < len(str(previous.get("email", ""))):
+            by_submission[key] = row
+    merged = sorted(by_submission.values(), key=lambda row: (str(row.get("submitted_at") or ""), row["response_id"]))
     write_json(path, merged)
     return merged
 
