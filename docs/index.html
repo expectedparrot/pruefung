@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A practical tutorial for building, checking, deploying, and grading EDSL exams with Pruefung.">
+  <title>Expected Parrot | Build better exams with Pruefung</title>
+  <style>
+    :root{--green:#4f812f;--dark:#274119;--lime:#edf5e8;--gold:#e7a739;--ink:#192116;--muted:#667061;--paper:#f4f6f2;--line:#dde4d9;--code:#172015;--sidebar:285px;--serif:Georgia,"Times New Roman",serif;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;--mono:"SFMono-Regular",Consolas,monospace}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;color:var(--ink);background:var(--paper);font:16px/1.7 var(--sans)}
+    nav{position:fixed;inset:0 auto 0 0;width:var(--sidebar);height:100vh;overflow:auto;padding:25px 21px 42px;color:#eef6ea;background:var(--dark)}.brand{display:block;margin-bottom:25px;padding:13px 14px;color:var(--ink);background:#fff;border-radius:9px;text-decoration:none}.brand strong{display:block;font:700 19px/1.15 var(--serif)}.brand small{color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.book{margin:0 8px 24px;font:600 20px/1.3 var(--serif)}.part{margin:20px 8px 5px;color:#add094;font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}nav>a:not(.brand){display:block;padding:6px 8px;color:#dbead2;text-decoration:none;border-radius:5px}nav>a:not(.brand):hover{color:#fff;background:#395a28}
+    main{margin-left:var(--sidebar)}article{max-width:930px;min-height:100vh;margin:auto;padding:50px 52px 110px;background:#fff}header{padding-bottom:46px;border-bottom:3px solid var(--green)}.hero{display:block;width:100%;margin:0 0 32px;border:1px solid var(--line);border-radius:10px}.eyebrow{color:var(--green);font-size:12px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}h1,h2,h3{font-family:var(--serif);line-height:1.28}h1{margin:13px 0 17px;font-size:clamp(42px,7vw,64px);letter-spacing:-.03em}h2{margin:75px 0 22px;padding:10px 0;color:var(--green);font-size:31px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}h3{margin:38px 0 10px;font-size:22px}.dek{max-width:750px;color:var(--muted);font-size:21px;line-height:1.5}.cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:24px}.cta a{padding:10px 16px;border-radius:8px;font-weight:750;text-decoration:none}.primary{color:#fff;background:var(--green)}.secondary{color:var(--dark);border:2px solid var(--green)}
+    p,ul,ol,pre,table,.box,.flow{max-width:790px}a{color:var(--green)}code{padding:.15em .35em;background:#eff3ed;border-radius:4px;font:88% var(--mono)}pre{overflow:auto;margin:18px 0 25px;padding:20px 22px;color:#e5ede0;background:var(--code);border-radius:8px;font:13px/1.58 var(--mono)}pre code{padding:0;color:inherit;background:none}.box{margin:27px 0;padding:20px 24px;background:var(--lime);border-left:4px solid var(--green);border-radius:0 8px 8px 0}.warning{background:#fff8e7;border-color:var(--gold)}.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:27px 0}.flow div{padding:13px 8px;background:var(--lime);border:1px solid #cfdfc5;border-radius:7px;text-align:center;font-size:13px;font-weight:750}.flow b{display:block;color:var(--green);font-size:20px}table{width:100%;margin:20px 0 28px;border-collapse:collapse;font-size:14px}th,td{padding:11px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{color:#fff;background:var(--green)}tbody tr:nth-child(even){background:#f7f9f6}.tree{white-space:pre-wrap}.tag{display:inline-block;margin-top:18px;padding:4px 10px;color:#664812;background:#fff0c8;border:1px solid #e9ca79;border-radius:999px;font-size:12px;font-weight:750}footer{margin-top:82px;padding-top:26px;color:var(--muted);border-top:3px solid var(--green);font-size:13px}
+    @media(max-width:900px){nav{position:static;width:auto;height:auto}nav>a:not(.brand){display:inline-block}.part{display:block}main{margin:0}article{padding:30px 24px 80px}}@media(max-width:650px){.flow{grid-template-columns:1fr 1fr}}
+  </style>
+</head>
+<body>
+<nav aria-label="Tutorial contents">
+  <a class="brand" href="https://www.expectedparrot.com/"><strong>Expected Parrot</strong><small>Open-source research tools</small></a>
+  <div class="book">Build better exams<br>with Pruefung</div>
+  <div class="part">Orientation</div><a href="#why">What Pruefung does</a><a href="#workflow">The workflow</a><a href="#install">Install</a>
+  <div class="part">Worked tutorial</div><a href="#project">Start a course</a><a href="#materials">Add materials</a><a href="#bank">Build the bank</a><a href="#qc">Quality control</a><a href="#exam">Assemble an exam</a><a href="#deploy">Preview and deploy</a><a href="#grade">Grade and review</a>
+  <div class="part">Reference</div><a href="#files">Project files</a><a href="#principles">Operating principles</a>
+</nav>
+<main><article>
+  <header>
+    <img class="hero" src="../assets/pruefung-artwork.png" alt="A green parrot operating a printing press that produces exams">
+    <div class="eyebrow">Expected Parrot · An agent-first assessment workflow</div>
+    <h1>Build exams you can inspect.</h1>
+    <p class="dek">Pruefung helps a professor and a coding agent turn course materials into a durable item bank, check questions with an independent panel, field a frozen EDSL survey, and grade responses without hiding the answer key inside the survey.</p>
+    <div class="cta"><a class="primary" href="https://github.com/expectedparrot/pruefung">View on GitHub →</a><a class="secondary" href="https://docs.expectedparrot.com/">Explore EDSL</a></div>
+    <span class="tag">Version 0.1 · Python 3.10+</span>
+  </header>
+
+  <section id="why"><h2>What Pruefung does</h2>
+    <p>Assessment work has several different kinds of truth: source materials, concepts, question wording, answer keys, quality-control evidence, the exact instrument students saw, submitted responses, and final grading decisions. Pruefung keeps each kind in an inspectable file rather than collapsing the whole process into an opaque generation step.</p>
+    <p>Questions are real EDSL objects. Their answer keys, rubrics, and point values live separately in Pruefung metadata, so the deployed survey cannot reveal them. Exams remain live views over the bank while they are being assembled and become immutable deep copies when deployed.</p>
+    <div class="box"><strong>Pruefung does not author questions.</strong> The professor or a coding agent writes them. When a task needs an LLM—blind-solve QC, rubric grading, or optional concept suggestions—the CLI creates an inspectable package for the user to run and ingest.</div>
+  </section>
+
+  <section id="workflow"><h2>The workflow</h2>
+    <div class="flow"><div><b>1</b>Materials</div><div><b>2</b>Item bank</div><div><b>3</b>QC panel</div><div><b>4</b>Deployment</div><div><b>5</b>Grades</div></div>
+    <ol><li>Register course sources and render only the pages, slides, headings, or Git history needed.</li><li>Define concepts and add validated EDSL questions with private scoring metadata.</li><li>Create a portable QC task, run it with the selected models, and ingest the hash-guarded verdict.</li><li>Assemble an exam, inspect its balance, attach a roster, preview it, and freeze it at deployment.</li><li>Fetch responses, score objective items deterministically, review free text, and export a gradebook.</li></ol>
+  </section>
+
+  <section id="install"><h2>Install Pruefung</h2>
+    <pre><code>uv tool install git+https://github.com/expectedparrot/pruefung.git
+pruefung --help</code></pre>
+    <p>For development, clone the repository and install an editable environment:</p>
+    <pre><code>git clone https://github.com/expectedparrot/pruefung.git
+cd pruefung
+python -m pip install -e ".[dev]"
+pytest -q</code></pre>
+    <p>EDSL and Expected Parrot credentials are used only at the explicit inference and Humanize boundaries. Pruefung never stores API keys.</p>
+  </section>
+
+  <section id="project"><h2>1. Start a course workspace</h2>
+    <pre><code>mkdir stat-101-exams &amp;&amp; cd stat-101-exams
+pruefung init --course "STAT 101: Intro to Statistics"</code></pre>
+    <p>The command creates <code>.pruefung/</code>. Commands run from nested directories discover that project by walking upward, much like Git.</p>
+    <p>JSON is the default interface for agents:</p>
+    <pre><code>{"ok":true,"command":"init","data":{"course":"STAT 101: Intro to Statistics"},"warnings":[],"errors":[]}</code></pre>
+    <p>Add <code>--human</code> or <code>-H</code> when a professor wants a terminal-oriented rendering.</p>
+  </section>
+
+  <section id="materials"><h2>2. Register and render materials</h2>
+    <p>Registration records provenance and copies local originals. Rendering is separate, so a 90-slide deck need not become context when only one unit matters.</p>
+    <pre><code>pruefung ingest syllabus.pdf
+pruefung source add slides/full-semester.pptx --name slides
+pruefung source render slides --slice s41-72
+
+pruefung source add https://stats101.example.edu/notes/ci-handout \
+  --name ci_handout
+pruefung source render ci_handout
+pruefung materials -H</code></pre>
+    <p>Pruefung also handles DOCX, Markdown, text, transcripts, page slices such as <code>p40-55</code>, heading slices such as <code>h2:Sampling</code>, and Git log/diff sources. Every render has its own content hash.</p>
+  </section>
+
+  <section id="bank"><h2>3. Build the item bank</h2>
+    <p>Concepts provide the coverage vocabulary for the course:</p>
+    <pre><code>pruefung concepts add sampling_distributions
+pruefung concepts add clt --note "weeks 3-4"
+pruefung concepts add confidence_intervals
+pruefung concepts add p_values</code></pre>
+    <p>Consult the machine-readable schema before constructing question files or commands:</p>
+    <pre><code>pruefung schema question
+pruefung schema concept</code></pre>
+    <p>Add a multiple-choice item. Answer indices are zero-based, so <code>--answer 2</code> selects the third option.</p>
+    <pre><code>pruefung question add --type mcq --name ci_interpretation \
+  --text "A 95% confidence interval for a population mean is (12.1, 15.9). Which interpretation is correct?" \
+  --option "95% of the data fall between 12.1 and 15.9" \
+  --option "The population mean is in the interval with probability 0.95" \
+  --option "The procedure produces intervals containing the true mean 95% of the time" \
+  --option "95% of sample means fall between 12.1 and 15.9" \
+  --answer 2 --points 2 --concept confidence_intervals</code></pre>
+    <p>Free-text items require an explicit rubric:</p>
+    <pre><code>pruefung question add --type free_text --name explain_clt \
+  --text "Explain when and why the central limit theorem is useful." \
+  --points 4 --concept clt --rubric-file rubrics/clt.md</code></pre>
+    <pre><code>pruefung validate
+pruefung ls -H
+pruefung coverage</code></pre>
+    <div class="warning box"><strong>After a direct edit:</strong> run <code>pruefung validate</code>. A changed content hash resets the question to <code>draft</code> and invalidates pending inference results that were built against the previous version.</div>
+  </section>
+
+  <section id="qc"><h2>4. Run blind-solve quality control</h2>
+    <p><code>qc make</code> writes serialized surveys, scenarios, models, a task manifest, and a small runner. It does not call a model.</p>
+    <pre><code>pruefung qc make
+pruefung inference
+
+# Inspect the package before paid execution
+ls .pruefung/inference/qc_01
+python .pruefung/inference/qc_01/run.py
+
+pruefung qc ingest qc_01
+pruefung ls --status qc_passed</code></pre>
+    <p>The panel answers each item without seeing its key and flags ambiguity, cues, or a likely miskey. Results can be ingested only while their recorded content hashes still match the bank.</p>
+  </section>
+
+  <section id="exam"><h2>5. Assemble and inspect an exam</h2>
+    <pre><code>pruefung exam create quiz-1 --title "Quiz 1" \
+  --instructions "You have 20 minutes. Closed book. Answer every question."
+pruefung exam add quiz-1 q001 q004 q005 q007 q010
+pruefung exam stats quiz-1 -H</code></pre>
+    <p>Statistics report points, estimated duration, type mix, concept coverage, uncovered concepts, QC readiness, and balance warnings. While the exam is building, edits to bank questions are reflected immediately.</p>
+    <p>Attach a CSV roster with a required <code>email</code> column and optional <code>name</code> and <code>student_id</code> columns:</p>
+    <pre><code>pruefung exam roster quiz-1 roster.csv
+pruefung exam stats quiz-1</code></pre>
+  </section>
+
+  <section id="deploy"><h2>6. Preview, freeze, and deploy</h2>
+    <pre><code>pruefung exam preview quiz-1 -H
+pruefung exam preview quiz-1 --web
+pruefung exam deploy quiz-1 --dry-run
+pruefung exam deploy quiz-1</code></pre>
+    <p>The real deployment deep-copies every question, applies a consistent option permutation to options and keys, assigns stable exam question names, exports the key-free EDSL Survey, and publishes a private Humanize project. The building exam then becomes immutable.</p>
+    <div class="warning box"><strong>Deployment is a checkpoint.</strong> It performs network I/O and freezes the assessment. Inspect the web preview and dry-run output, confirm the roster, and obtain the professor's approval first.</div>
+  </section>
+
+  <section id="grade"><h2>7. Monitor, grade, and review</h2>
+    <pre><code>pruefung status quiz-1
+pruefung grade quiz-1</code></pre>
+    <p>Multiple-choice and true/false items use exact matching. Checkbox items can use all-or-nothing or explicit per-option partial credit. Existing manual overrides are preserved.</p>
+    <p>When free-text answers remain, create and run a rubric panel package at the same inspectable inference boundary. Disagreement beyond the configured tolerance becomes <code>needs_review</code> for the professor rather than a silently chosen score.</p>
+    <p>The authoritative JSON gradebook and regenerated CSV live under <code>.pruefung/gradebooks/</code>. Keep these files private: they contain protected student records.</p>
+  </section>
+
+  <section id="files"><h2>What Pruefung stores</h2>
+    <pre class="tree"><code>.pruefung/
+├── config.json
+├── materials/       # originals, Markdown renders, provenance
+├── concepts/        # one JSON file per concept
+├── questions/       # EDSL object + private scoring metadata
+├── exams/           # building or frozen deployed exams
+├── inference/       # inspectable make → run → ingest tasks
+└── gradebooks/      # protected JSON and CSV records</code></pre>
+    <p>One file per object keeps diffs readable and permits careful concurrent editing. Directory scans are authoritative; generated manifests and exports are caches or artifacts.</p>
+  </section>
+
+  <section id="principles"><h2>Operating principles</h2>
+    <table><thead><tr><th>Principle</th><th>Practical consequence</th></tr></thead><tbody>
+      <tr><td>EDSL-native</td><td>Questions are validated and serialized by EDSL, not reconstructed from templates.</td></tr>
+      <tr><td>Key separation</td><td>Answers, rubrics, and points never enter the deployed Survey.</td></tr>
+      <tr><td>No hidden inference</td><td>Model work happens only through an inspectable package the user runs.</td></tr>
+      <tr><td>Hash guarded</td><td>Stale QC or grading results cannot be applied to changed content.</td></tr>
+      <tr><td>Freeze at deploy</td><td>The exact assessment seen by students remains auditable afterward.</td></tr>
+      <tr><td>Professor authority</td><td>Ambiguous panel grades and exceptional responses remain reviewable.</td></tr>
+    </tbody></table>
+  </section>
+
+  <footer><strong>Pruefung</strong> is an open-source Expected Parrot project. Source, issues, and the full specification are available at <a href="https://github.com/expectedparrot/pruefung">github.com/expectedparrot/pruefung</a>.</footer>
+</article></main>
+</body>
+</html>

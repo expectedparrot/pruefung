@@ -6,6 +6,8 @@
 
 `pruefung` is an agent-first CLI for building, checking, deploying, and grading quizzes and exams with EDSL-native questions. It stores inspectable state in `.pruefung/`, emits JSON envelopes by default, and keeps all model inference behind a make → run → ingest boundary.
 
+[Read the illustrated tutorial](https://expectedparrot.github.io/pruefung/) · [View the specification](pruefung-spec.md)
+
 ```bash
 python -m pip install -e .
 pruefung init --course "STAT 101"
