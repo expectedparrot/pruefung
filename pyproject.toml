@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pruefung"
-version = "0.1.0"
+version = "0.1.1"
 description = "Agent-first EDSL exam authoring, quality-control, deployment, and grading CLI"
 readme = "README.md"
 requires-python = ">=3.10"

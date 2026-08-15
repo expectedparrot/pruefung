@@ -55,6 +55,11 @@ EDSL inputs, selected models, question count, and expected call count. Obtain
 approval before paid inference. Never modify hashes in a result envelope to
 bypass a stale-task rejection; rebuild the task against current content.
 
+Use `pruefung qc report <task-id> -H` to investigate a failed panel. Never
+rewrite a result payload or reset an ingested task to manufacture a passing
+verdict. Model benchmarking against deployed exams is intentionally outside the
+v1 workflow; do not improvise it by running models against managed exam files.
+
 Coop calls for Humanize deployment and response retrieval are network I/O, not
 model inference. Let EDSL manage credentials. Never print, copy, store, or
 commit API keys, `.env` files, student responses, rosters, or gradebooks.
