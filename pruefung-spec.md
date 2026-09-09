@@ -351,9 +351,13 @@ pruefung grade <exam_id> [--rescore]
 6. Report: score distribution (median/mean/range); per-item p-value (proportion of points earned), point-biserial vs. total, top distractor share for mcq (with text snippet); flags: `p > .95` too easy, `p < .10` too hard/possible miskey, point-biserial `< .20` low discrimination, negative point-biserial → "probable miskey" stated plainly. CTT only; no IRT in v1.
 
 ```
-pruefung review <exam_id> [--student <email>]
+pruefung review <exam_id> [--student <email-or-name>] [--question <qid-or-question-name>]
+pruefung review <exam_id> --student <email-or-name> --question <qid-or-question-name> \
+  --score <points> --reason "<professor rationale>" --professor-approved
 ```
-Interactive (implies `-H`): steps through `needs_review` free-text answers (question, rubric, student answer, both panel scores + justifications); professor enters a final score or accepts a panel score → written with `override: true`. `--student` allows overriding any individual score.
+Without a score, returns private review evidence for unresolved answers (question, rubric, student answer, panel scores and feedback). A question selector also permits inspection of a resolved item. Recording a score requires a student, question, rationale, and explicit professor approval; it preserves panel evidence, appends an audit entry, clears `needs_review`, and sets `override: true`. JSON and CSV grades are updated and the default aggregate HTML report is regenerated. Other exported reports should be regenerated after a decision. `agent next` directs disputed scores to professor review; `grade-make` includes only ungraded, matched responses without existing panel evidence or overrides.
+
+Reports with unresolved scores are provisional. Unresolved scores are excluded from item and concept means, and total-score statistics include only fully graded students. CSV totals remain blank for provisional students, with a `status` column distinguishing provisional and final rows.
 
 ### 5.6 Inference round trip (QC, rubric grading, concept suggestions)
 

@@ -118,6 +118,11 @@ Inspect the model scores and rubric-specific feedback before ingestion. If
 the panel disagreement exceeds the managed threshold, leave the item marked
 `needs_review` for professor judgment; do not present an unresolved report as
 final. Regenerate the post-exam report after any manual grading decision.
+Use `review <exam-id>` to inspect disputed responses, then record the professor's
+decision with `review <exam-id> --student <email> --question <qid> --score <points>
+--reason "..." --professor-approved`. Only use that confirmation flag after the
+professor explicitly decides the score. The command preserves reviewer evidence
+and refreshes the default aggregate report; regenerate any other exported reports.
 Use `student-report <exam-id> <email-or-name>` for one detailed instructor copy,
 or `student-reports <exam-id>` for printable cut sheets covering every student.
 These reports contain student responses and must remain private. Include the

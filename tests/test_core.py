@@ -205,10 +205,10 @@ def test_qc_contract_rejects_raw_results_then_ingests_normalized(tmp_path, monke
     malformed["payload"] = {
         "questions": {
             "q001": {
-                "panel_answers": [1, "beta", 1],
-                "blocking": [True, "No", False],
-                "notes": ["Possible issue", "none", "Looks fine"],
-                "models": ["gpt-4o", "gpt-4.1-mini", "gemini-2.5-flash"],
+                "panel_answers": ["beta"],
+                "blocking": ["No"],
+                "notes": ["Looks fine"],
+                "models": ["test"],
             }
         }
     }
@@ -501,6 +501,9 @@ def test_real_humanize_answer_cells_are_unwrapped():
 
 def test_post_exam_html_and_llm_rubric_grading(tmp_path, monkeypatch):
     runner = prepare_exam(tmp_path, monkeypatch)
+    roster = tmp_path / "roster.csv"
+    roster.write_text("email,name\nstudent@example.edu,Ada\nsecond@example.edu,Grace\n")
+    assert runner.invoke(cli, ["exam", "roster", "quiz-1", str(roster)]).exit_code == 0
     objective_path = tmp_path / ".pruefung/questions/q001.json"
     objective = read_json(objective_path)
     objective["meta"]["explanation"] = "Beta follows directly from the lecture."

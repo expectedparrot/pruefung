@@ -148,6 +148,17 @@ pruefung exam deploy quiz-1</code></pre>
 pruefung grade quiz-1</code></pre>
     <p>Multiple-choice and true/false items use exact matching. Checkbox items can use all-or-nothing or explicit per-option partial credit. Existing manual overrides are preserved.</p>
     <p>When free-text answers remain, create and run a rubric panel package at the same inspectable inference boundary. Disagreement beyond the configured tolerance becomes <code>needs_review</code> for the professor rather than a silently chosen score.</p>
+    <pre><code>pruefung grade-make quiz-1
+# Inspect the generated task; run it only after approval of paid inference.
+python .pruefung/inference/grade_quiz-1_01/run.py --yes
+pruefung grade-ingest quiz-1 grade_quiz-1_01
+pruefung review quiz-1</code></pre>
+    <p><code>review</code> displays the private response, rubric, and reviewer feedback. After the professor decides a score, record it with the student's email and the question ID:</p>
+    <pre><code>pruefung review quiz-1 --student student@example.edu --question q002 \
+  --score 3 --reason "Professor awards partial credit for the correct method" \
+  --professor-approved</code></pre>
+    <p>This preserves model feedback and records an audit history, updates the gradebook and CSV, and regenerates <code>quiz-1-report.html</code> in the current directory. Regenerate any reports previously exported to other paths and individual student reports after a decision. Disputed responses are not sent through another model panel automatically.</p>
+    <p>Roster-based exams grade only matched emails; unmatched responses and duplicate counts are reported separately. Open exams accept submitted email identities without a roster.</p>
     <p>The authoritative JSON gradebook and regenerated CSV live under <code>.pruefung/gradebooks/</code>. Keep these files private: they contain protected student records.</p>
     <pre><code class="language-bash">pruefung grade-report quiz-1 -H
 pruefung grade-report quiz-1 --anonymize
@@ -155,6 +166,7 @@ pruefung post-exam-report quiz-1
 pruefung student-report quiz-1 student@example.edu
 pruefung student-reports quiz-1</code></pre>
     <p>The self-contained HTML report is aggregate and contains every frozen question, its options, answer or score distribution, points earned, correct answer or free-text rubric, and the authored explanation. Free-text scores appear after the rubric-judge task has been run and ingested.</p>
+    <p>Reports remain marked provisional while scores need review. Item averages exclude unresolved scores, and total-score statistics include only fully graded students. The CSV leaves an unresolved total blank and marks its row <code>provisional</code>; an earned zero remains a scored zero.</p>
     <p>Individual and batch instructor reports are printable, Expected Parrot-branded cut sheets. Each section includes the student's response, score, rubric or correct answer, explanation, and the native EDSL grader comments explaining deductions. They contain protected student information and should not be published.</p>
     <div class="box"><strong>Scope boundary.</strong> Pruefung v1 administers exams to people. Having AI models take a deployed exam for score comparison is not yet a managed workflow; do not run ad hoc model jobs against frozen exam files.</div>
   </section>

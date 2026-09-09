@@ -52,13 +52,9 @@ def restore_question(data: dict[str, Any]) -> Any:
 def make_survey(question_dicts: list[dict[str, Any]], instructions: str | None = None) -> Any:
     edsl = edsl_module()
     questions = [restore_question(item) for item in question_dicts]
-    survey = edsl.Survey(questions)
     if instructions:
         try:
-            survey = edsl.Survey([edsl.Instruction(name="exam_instructions", text=instructions), *questions])
-        except Exception:
-            try:
-                survey.add_instruction(edsl.Instruction(name="exam_instructions", text=instructions))
-            except Exception:
-                pass
-    return survey
+            return edsl.Survey([edsl.Instruction(name="exam_instructions", text=instructions), *questions])
+        except Exception as exc:
+            raise ValidationError(f"could not preserve exam instructions: {exc}") from exc
+    return edsl.Survey(questions)

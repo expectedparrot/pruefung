@@ -3,8 +3,9 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,60 @@ class ConflictError(PruefungError):
 
 
 def now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def finite_number(value: Any, label: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValidationError(f"{label} must be a finite number") from exc
+    if isinstance(value, bool) or not math.isfinite(number):
+        raise ValidationError(f"{label} must be a finite number")
+    return number
+
+
+def validate_question_metadata(question: dict[str, Any]) -> None:
+    if not isinstance(question, dict) or any(not isinstance(question.get(key), dict) for key in ("meta", "edsl")):
+        raise ValidationError("question requires meta and edsl objects")
+    meta, edsl = question["meta"], question["edsl"]
+    points = meta.get("points")
+    if not isinstance(points, (int, float)) or finite_number(points, "points") <= 0:
+        raise ValidationError("points must be positive and finite")
+    ptype = meta.get("ptype")
+    types = {"mcq": "multiple_choice", "checkbox": "checkbox", "true_false": "yes_no", "free_text": "free_text"}
+    if not isinstance(ptype, str) or ptype not in types or edsl.get("question_type") != types[ptype]:
+        raise ValidationError("ptype must match the EDSL question type")
+    if any(key in edsl for key in ("answer", "rubric", "points", "explanation")):
+        raise ValidationError("scoring metadata must not appear in the EDSL question")
+    options = edsl.get("question_options", [])
+    if not isinstance(options, list):
+        raise ValidationError("question_options must be a list")
+    answer = meta.get("answer")
+    if ptype == "mcq" and len(options) != 4:
+        raise ValidationError("mcq requires exactly 4 options")
+    if ptype == "checkbox" and not 3 <= len(options) <= 6:
+        raise ValidationError("checkbox requires 3-6 options")
+    if ptype in {"mcq", "checkbox"}:
+        indices = answer if ptype == "checkbox" else [answer]
+        if (
+            not isinstance(indices, list)
+            or not indices
+            or any(type(index) is not int or not 0 <= index < len(options) for index in indices)
+            or len(indices) != len(set(indices))
+        ):
+            raise ValidationError("answer requires valid, distinct zero-based option indices")
+    if ptype == "true_false" and type(answer) is not bool:
+        raise ValidationError("true_false answer must be a boolean")
+    if ptype == "free_text" and (not isinstance(meta.get("rubric"), str) or not meta["rubric"].strip()):
+        raise ValidationError("free_text requires a nonempty rubric")
+    if "rubric" in meta and (not isinstance(meta["rubric"], str) or not meta["rubric"].strip()):
+        raise ValidationError("rubric must be a nonempty string")
+    if "partial_credit" in meta and (
+        ptype != "checkbox" or not isinstance(meta["partial_credit"], str)
+        or meta["partial_credit"] not in {"none", "per_option"}
+    ):
+        raise ValidationError("partial_credit requires a checkbox and must be none or per_option")
 
 
 def canonical_hash(value: Any) -> str:

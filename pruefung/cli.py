@@ -22,6 +22,7 @@ from .core import (
     canonical_hash,
     concept_files,
     find_root,
+    finite_number,
     load_exam,
     load_question,
     now,
@@ -33,6 +34,7 @@ from .core import (
     slugify,
     state,
     validate_id,
+    validate_question_metadata,
     write_json,
 )
 from .edsl_support import make_question, make_survey, restore_question
@@ -113,19 +115,6 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "commands": [f"pruefung source render {first}", "pruefung materials -H"],
         }
 
-    if not concepts:
-        return "concepts", {
-            "kind": "authoring",
-            "reason": "The course has no concepts yet.",
-            "commands": ["pruefung schema concept", "pruefung concepts add <concept-id>"],
-        }
-    if not questions:
-        return "item_bank", {
-            "kind": "authoring",
-            "reason": "Concepts exist, but the item bank is empty.",
-            "commands": ["pruefung schema question", "pruefung question add --help"],
-        }
-
     mix = Counter(question["meta"]["ptype"] for question in questions)
     bank_hash = canonical_hash({question["meta"]["id"]: question["meta"]["content_hash"] for question in questions})
     mix_review = read_json(state(root) / "question-mix-review.json", {})
@@ -166,6 +155,19 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
             "user_message": "I’ve prepared the independent review. May I run it now? It uses paid model calls.",
             "requires_approval": True,
             "commands": [f"python .pruefung/inference/{task['task_id']}/run.py"],
+        }
+
+    if not concepts:
+        return "concepts", {
+            "kind": "authoring",
+            "reason": "The course has no concepts yet.",
+            "commands": ["pruefung schema concept", "pruefung concepts add <concept-id>"],
+        }
+    if not questions:
+        return "item_bank", {
+            "kind": "authoring",
+            "reason": "Concepts exist, but the item bank is empty.",
+            "commands": ["pruefung schema question", "pruefung question add --help"],
         }
 
     drafts = [question["meta"]["id"] for question in questions if question["meta"]["status"] == "draft"]
@@ -257,6 +259,20 @@ def next_action(root: Path) -> tuple[str, dict[str, Any]]:
         if item.get("needs_review")
     ]
     if unresolved:
+        disputed = [
+            f"{student['email']}:{item['question_name']}"
+            for student in gradebook.get("students", [])
+            for item in student.get("items", [])
+            if item.get("needs_review") and item.get("panel")
+        ]
+        if disputed:
+            return "professor_review", {
+                "kind": "organizer_input",
+                "reason": "Model recommendations disagree; preserve the evidence for professor judgment.",
+                "user_message": f"{len(disputed)} written response(s) received conflicting score recommendations and need your judgment.",
+                "answers": disputed,
+                "commands": [f"pruefung review {exam_id}", "pruefung review --help"],
+            }
         return "free_text_grading", {
             "kind": "external_execution",
             "reason": f"{len(unresolved)} free-text answer(s) require rubric scoring or professor review.",
@@ -551,9 +567,21 @@ def concepts_import(ctx: click.Context, input_file: Path, review: bool, human: b
     if review and not ctx.find_root().obj.human:
         raise ValidationError("--review requires --human")
     data = read_json(input_file)
-    items = data.get("concepts") or data.get("payload", {}).get("suggestions")
+    task_path, task = None, None
+    if any(key in data for key in ("task_id", "kind", "payload")):
+        task_path, task, data = validate_result(root, str(input_file), "concept_suggest")
+        if task["status"] == "ingested":
+            emit(ctx, {"task_id": task["task_id"], "ingested": False}, warnings=["result already ingested"])
+            return
+        items = data.get("payload", {}).get("suggestions")
+    else:
+        items = data.get("concepts")
     if not isinstance(items, list):
         raise ValidationError("input must contain concepts or payload.suggestions")
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValidationError("each concept must be an object")
+        validate_id(item.get("id", ""), r"[a-z0-9_]+", "concept id")
     added, skipped = [], []
     for item in items:
         cid = item.get("id", "")
@@ -565,6 +593,9 @@ def concepts_import(ctx: click.Context, input_file: Path, review: bool, human: b
         value = {"id": cid, "note": item.get("note", ""), "added_at": now()}
         write_json(path, value)
         added.append(cid)
+    if task is not None:
+        task.update(status="ingested", ingested_at=now())
+        write_json(task_path, task)
     emit(ctx, {"added": added}, warnings=[f"duplicate skipped: {x}" for x in skipped])
 
 
@@ -780,6 +811,7 @@ def question_add(
             raise ValidationError(f"unknown material renders: {', '.join(sorted(unknown))}")
         meta["source_materials"] = list(source_material)
     value = {"edsl": edsl_dict, "meta": meta}
+    validate_question_metadata(value)
     meta["content_hash"] = question_hash(value)
     write_json(path, value)
     number = int(qid[1:])
@@ -803,12 +835,13 @@ def question_set(ctx: click.Context, qid: str, field: str, value: str, human: bo
     if field not in {"points", "concept", "answer", "rubric", "explanation", "distractor_notes", "partial_credit"}:
         raise ValidationError(f"unsupported field: {field}")
     if field == "points":
-        value = float(value)
+        value = finite_number(value, "points")
     elif field == "answer":
         value = parse_answer(q["meta"]["ptype"], value, len(q["edsl"].get("question_options", [])))
     elif field == "concept" and not (state(root) / "concepts" / f"{value}.json").exists():
         raise ValidationError(f"unknown concept: {value}")
     q["meta"][field] = value
+    validate_question_metadata(q)
     q["meta"].update(status="draft", qc=None, updated_at=now())
     q["meta"]["content_hash"] = question_hash(q)
     write_json(state(root) / "questions" / f"{qid}.json", q)
@@ -855,6 +888,7 @@ def validate_cmd(ctx: click.Context, human: bool) -> None:
         try:
             q = read_json(path)
             meta = q["meta"]
+            validate_question_metadata(q)
             if meta["id"] != path.stem:
                 raise ValidationError("id does not match filename")
             restore_question(q["edsl"])
@@ -1114,6 +1148,7 @@ def freeze_exam(
     frozen_rows = []
     for index, qid in enumerate(exam["members"], start=1):
         frozen = copy.deepcopy(load_question(root, qid))
+        validate_question_metadata(frozen)
         ptype = frozen["meta"]["ptype"]
         permutation = None
         if shuffle and ptype in {"mcq", "checkbox"}:
@@ -1137,8 +1172,13 @@ def freeze_exam(
                 "question_name": question_name,
             }
         )
-    survey = make_survey([x["frozen"]["edsl"] for x in frozen_rows], exam.get("instructions"))
+    survey = exam_survey(frozen_rows, exam.get("instructions"))
     return frozen_rows, survey
+
+
+def exam_survey(rows: list[dict[str, Any]], instructions: str | None) -> Any:
+    identity = make_question("free_text", "pruefung_respondent_email", "Your university email address", [])
+    return make_survey([identity.to_dict(), *[row["frozen"]["edsl"] for row in rows]], instructions)
 
 
 @exam_group.command("preview")
@@ -1154,7 +1194,7 @@ def exam_preview(ctx: click.Context, exam_id: str, web: bool, human: bool) -> No
     else:
         rows, survey = (
             exam["questions"],
-            make_survey([x["frozen"]["edsl"] for x in exam["questions"]], exam.get("instructions")),
+            exam_survey(exam["questions"], exam.get("instructions")),
         )
     if not web:
         emit(ctx, {"exam_id": exam_id, "questions": rows})
@@ -1220,16 +1260,6 @@ def exam_deploy(
             warnings=["draft questions allowed: " + ", ".join(not_ready)] if not_ready else [],
         )
         return
-    # A plain roster does not provide an EDSL AgentList/delivery map. Prepend
-    # the specified identity question so response-to-roster joins remain fully
-    # functional without relying on unavailable per-respondent links.
-    edsl = __import__("edsl")
-    identity = edsl.QuestionFreeText(
-        question_name="pruefung_respondent_email",
-        question_text="Your university email address",
-    )
-    survey = edsl.Survey([identity, *[restore_question(x["frozen"]["edsl"]) for x in rows]])
-    survey_dict = survey.to_dict()
     receipt_path = path.parent / "deployment.json"
     receipt = read_json(receipt_path)
     if receipt:
@@ -1415,8 +1445,8 @@ def make_task(
         ):
             return task["task_id"], False
     edsl = __import__("edsl")
-    if len(models) != len(set(models)):
-        raise ValidationError("model panel must contain distinct model names")
+    if not models or len(models) != len(set(models)):
+        raise ValidationError("model panel must contain at least one model and distinct model names")
     try:
         model_list = edsl.ModelList([edsl.Model(model) for model in models])
     except Exception as exc:
@@ -1480,6 +1510,7 @@ def qc_make(ctx: click.Context, only: str | None, models: str, force: bool, huma
     }
     material_hashes = {}
     for q in questions:
+        validate_question_metadata(q)
         qid = q["meta"]["id"]
         answer_question = restore_question(q["edsl"])
         survey_questions.append(answer_question)
@@ -1571,8 +1602,11 @@ def validate_result(root: Path, task_ref: str, kind: str) -> tuple[Path, dict[st
         for render in source.get("renders", [])
     }
     for object_id, expected in result.get("input_hashes", {}).items():
-        if object_id.startswith("q") and (state(root) / "questions" / f"{object_id}.json").exists():
-            current = load_question(root, object_id)["meta"]["content_hash"]
+        if object_id.startswith("q"):
+            question = read_json(state(root) / "questions" / f"{object_id}.json")
+            current = question_hash(question) if question else None
+            if question and current != question["meta"].get("content_hash"):
+                current = None
         elif object_id.startswith("material:"):
             current = material_hashes.get(object_id)
         elif object_id.startswith("response:") and task.get("exam_id"):
@@ -1585,7 +1619,9 @@ def validate_result(root: Path, task_ref: str, kind: str) -> tuple[Path, dict[st
             response = next(
                 (
                     row
-                    for row in read_json(state(root) / "exams" / task["exam_id"] / "responses.json", [])
+                    for row in select_responses(
+                        exam, read_json(state(root) / "exams" / task["exam_id"] / "responses.json", [])
+                    )[0]
                     if row.get("email") == email
                 ),
                 None,
@@ -1615,6 +1651,31 @@ def validate_result(root: Path, task_ref: str, kind: str) -> tuple[Path, dict[st
     return task_path, task, result
 
 
+def validate_panel_models(models: Any, expected: list[str]) -> None:
+    if (
+        not expected
+        or not isinstance(models, list)
+        or not all(isinstance(model, str) for model in models)
+        or len(models) != len(set(models))
+        or set(models) != set(expected)
+    ):
+        raise ValidationError("results require exactly one response from each configured model")
+
+
+def panel_values(verdict: dict[str, Any], field: str, count: int) -> list[Any]:
+    values = verdict.get(field)
+    if not isinstance(values, list) or len(values) != count or any(value is None for value in values):
+        raise ValidationError(f"{field} requires one non-null value per model")
+    return values
+
+
+def panel_booleans(verdict: dict[str, Any], field: str, count: int) -> list[bool]:
+    values = [normalize_answer(value, "true_false", []) for value in panel_values(verdict, field, count)]
+    if any(type(value) is not bool for value in values):
+        raise ValidationError(f"{field} requires boolean votes")
+    return values
+
+
 @qc_group.command("ingest")
 @click.argument("task_ref")
 @human_option
@@ -1633,9 +1694,13 @@ def qc_ingest(ctx: click.Context, task_ref: str, human: bool) -> None:
     missing = set(expected_qids) - set(verdicts)
     if missing:
         raise ValidationError(f"QC result is missing verdicts for: {', '.join(sorted(missing))}")
+    if set(verdicts) != set(expected_qids):
+        raise ValidationError("QC result contains questions outside the task")
     updated = []
+    pending_questions = []
     for qid in expected_qids:
         q = load_question(root, qid)
+        validate_question_metadata(q)
         verdict = verdicts[qid]
         if (
             not isinstance(verdict, dict)
@@ -1643,16 +1708,31 @@ def qc_ingest(ctx: click.Context, task_ref: str, human: bool) -> None:
             or not isinstance(verdict.get("blocking"), list)
         ):
             raise ValidationError(f"QC verdict for {qid} requires panel_answers and blocking arrays")
+        validate_panel_models(verdict.get("models"), task["models"])
+        count = len(task["models"])
+        notes = panel_values(verdict, "notes", count)
+        if any(not isinstance(note, str) for note in notes):
+            raise ValidationError("QC notes must be strings")
         answers = [
             normalize_answer(value, q["meta"]["ptype"], q["edsl"].get("question_options", []))
-            for value in verdict["panel_answers"]
+            for value in panel_values(verdict, "panel_answers", count)
         ]
-        blocking = [normalize_answer(value, "true_false", []) for value in verdict.get("blocking", [])]
+        for answer in answers:
+            if q["meta"]["ptype"] == "free_text":
+                if not isinstance(answer, str) or not answer.strip():
+                    raise ValidationError("free-text panel answers must be nonempty strings")
+            else:
+                candidate = copy.deepcopy(q)
+                candidate["meta"]["answer"] = answer
+                validate_question_metadata(candidate)
+        blocking = panel_booleans(verdict, "blocking", count)
         blocking_votes = sum(value is True for value in blocking)
         blocking_majority = blocking_votes > len(blocking) / 2
         if q["meta"]["ptype"] == "free_text":
-            scores = [float(value) for value in verdict.get("rubric_scores", []) if value is not None]
-            clarity = [normalize_answer(value, "true_false", []) for value in verdict.get("rubric_clear", [])]
+            scores = [finite_number(value, "rubric score") for value in panel_values(verdict, "rubric_scores", count)]
+            if any(score < 0 or score > q["meta"]["points"] for score in scores):
+                raise ValidationError("rubric score outside the question point range")
+            clarity = panel_booleans(verdict, "rubric_clear", count)
             passed = bool(
                 scores
                 and statistics.mean(scores) >= (2 * q["meta"]["points"] / 3)
@@ -1674,8 +1754,10 @@ def qc_ingest(ctx: click.Context, task_ref: str, human: bool) -> None:
             qc={"task_id": task["task_id"], "passed": bool(passed), "notes": verdict},
             updated_at=now(),
         )
-        write_json(state(root) / "questions" / f"{qid}.json", q)
+        pending_questions.append(q)
         updated.append({"id": qid, "status": q["meta"]["status"]})
+    for q in pending_questions:
+        write_json(state(root) / "questions" / f"{q['meta']['id']}.json", q)
     task["status"] = "ingested"
     task["ingested_at"] = now()
     write_json(task_path, task)
@@ -1830,22 +1912,57 @@ def response_answer(response: dict[str, Any], name: str) -> Any:
     return answers.get(name) if isinstance(answers, dict) else None
 
 
+def select_responses(
+    exam: dict[str, Any], responses: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    roster = {row["email"].strip().lower() for row in exam.get("roster", [])}
+    open_link = exam.get("published", {}).get("enrollment_mode") == "open"
+    latest, unmatched, discarded = {}, [], []
+    for response in responses:
+        email = str(response.get("email") or "").strip().lower()
+        if not email or (not open_link and email not in roster):
+            unmatched.append(response)
+            continue
+        if email in latest:
+            discarded.append(latest[email])
+        latest[email] = {**response, "email": email}
+    return list(latest.values()), unmatched, discarded
+
+
+def item_pending(item: dict[str, Any]) -> bool:
+    return item.get("score") is None or bool(item.get("needs_review"))
+
+
+def student_pending(student: dict[str, Any]) -> bool:
+    return any(item_pending(item) for item in student.get("items", []))
+
+
+def write_gradebook(root: Path, exam_id: str, gradebook: dict[str, Any]) -> tuple[Path, Path]:
+    gradebook["updated_at"] = now()
+    for student in gradebook["students"]:
+        student["score"] = sum(item.get("score") or 0 for item in student["items"])
+        student["provisional"] = student_pending(student)
+    gb_path = state(root) / "gradebooks" / f"{exam_id}.gradebook.json"
+    write_json(gb_path, gradebook)
+    csv_path = gb_path.with_suffix(".csv")
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["email", "name", "score", "total_points", "status"])
+        writer.writerows(
+            [s["email"], s.get("name", ""), "" if s["provisional"] else s["score"], s["total_points"],
+             "provisional" if s["provisional"] else "final"]
+            for s in gradebook["students"]
+        )
+    return gb_path, csv_path
+
+
 def deterministic_grade(
     exam: dict[str, Any], responses: list[dict[str, Any]], existing: dict[str, Any] | None, rescore: bool
 ) -> dict[str, Any]:
     old_by_email = {x["email"]: x for x in (existing or {}).get("students", [])}
     students = []
-    unmatched = [response for response in responses if not response.get("email")]
-    latest_by_email: dict[str, dict[str, Any]] = {}
-    discarded: list[dict[str, Any]] = []
-    for response in responses:
-        email = str(response.get("email") or "").lower()
-        if not email:
-            continue
-        if email in latest_by_email:
-            discarded.append(latest_by_email[email])
-        latest_by_email[email] = response
-    for response in latest_by_email.values():
+    selected, unmatched, discarded = select_responses(exam, responses)
+    for response in selected:
         email = (response.get("email") or response.get("identifier") or "").lower()
         old = old_by_email.get(email, {})
         items = []
@@ -1853,6 +1970,11 @@ def deterministic_grade(
             q, name = row["frozen"], row["question_name"]
             previous = next((x for x in old.get("items", []) if x["question_name"] == name), None)
             if previous and previous.get("override"):
+                items.append(previous)
+                continue
+            if previous and q["meta"]["ptype"] == "free_text" and (
+                previous.get("panel") or previous.get("score") is not None
+            ):
                 items.append(previous)
                 continue
             if previous and previous.get("score") is not None and not rescore:
@@ -1921,13 +2043,8 @@ def grade_cmd(ctx: click.Context, exam_id: str, rescore: bool, human: bool) -> N
     responses = sync_responses(state(root) / "exams" / exam_id, exam)
     gb_path = state(root) / "gradebooks" / f"{exam_id}.gradebook.json"
     gradebook = deterministic_grade(exam, responses, read_json(gb_path), rescore)
-    write_json(gb_path, gradebook)
-    csv_path = state(root) / "gradebooks" / f"{exam_id}.gradebook.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["email", "name", "score", "total_points"])
-        writer.writerows([[x["email"], x["name"], x["score"], x["total_points"]] for x in gradebook["students"]])
-    scores = [x["score"] for x in gradebook["students"]]
+    gb_path, csv_path = write_gradebook(root, exam_id, gradebook)
+    scores = [x["score"] for x in gradebook["students"] if not student_pending(x)]
     summary = {
         "count": len(scores),
         "mean": statistics.mean(scores) if scores else None,
@@ -1942,7 +2059,13 @@ def grade_cmd(ctx: click.Context, exam_id: str, rescore: bool, human: bool) -> N
             "csv": str(csv_path),
             "summary": summary,
             "ungraded_free_text": pending,
-            "next_commands": [f"pruefung grade-make {exam_id}"] if pending else [],
+            "provisional": bool(pending),
+            "unmatched_responses": len(gradebook["unmatched_responses"]),
+            "discarded_duplicate_responses": gradebook["discarded_duplicate_responses"],
+            "next_commands": ([f"pruefung review {exam_id}"] if any(
+                item.get("needs_review") and item.get("panel")
+                for student in gradebook["students"] for item in student["items"]
+            ) else [f"pruefung grade-make {exam_id}"]) if pending else [],
         },
     )
 
@@ -1970,14 +2093,17 @@ def display_answer(value: Any, ptype: str, options: list[str]) -> str:
 
 def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize: bool) -> dict[str, Any]:
     students = gradebook.get("students", [])
-    scores = [float(student["score"]) for student in students]
+    scores = [float(student["score"]) for student in students if not student_pending(student)]
+    pending_count = sum(student_pending(student) for student in students)
     public_students = []
     for index, student in enumerate(students, start=1):
         public_students.append(
             {
                 "student": f"student-{index:03d}" if anonymize else student["email"],
                 "name": "" if anonymize else student.get("name", ""),
-                "score": student["score"],
+                "score": None if student_pending(student) else student["score"],
+                "earned_points": student["score"],
+                "provisional": student_pending(student),
                 "total_points": student["total_points"],
             }
         )
@@ -1986,12 +2112,21 @@ def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize
     for row in exam.get("questions", []):
         qid, qname, frozen = row["bank_id"], row["question_name"], row["frozen"]
         student_items = [next((item for item in s["items"] if item["question_name"] == qname), {}) for s in students]
-        ratios = [float(item.get("score") or 0) / float(item.get("max_points") or 1) for item in student_items]
+        scored_items = [item for item in student_items if not item_pending(item)]
+        ratios = [float(item["score"]) / float(item["max_points"]) for item in scored_items]
+        complete_pairs = [
+            (float(item["score"]) / float(item["max_points"]), float(student["score"]))
+            for student, item in zip(students, student_items)
+            if not student_pending(student) and not item_pending(item)
+        ]
         concepts[frozen["meta"]["concept"]].extend(ratios)
         ptype = frozen["meta"]["ptype"]
         options = frozen["edsl"].get("question_options", [])
         answer_counts = Counter(display_answer(item.get("answer"), ptype, options) for item in student_items)
-        score_counts = Counter(str(item.get("score")) for item in student_items)
+        score_counts = Counter(str(item["score"]) for item in scored_items)
+        pending_items = len(student_items) - len(scored_items)
+        if pending_items:
+            score_counts["Needs review"] = pending_items
         correct_answer = (
             frozen["meta"].get("rubric")
             if ptype == "free_text"
@@ -2009,7 +2144,9 @@ def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize
                 "correct_answer": correct_answer,
                 "explanation": frozen["meta"].get("explanation") or "No explanation was provided.",
                 "mean_proportion": statistics.mean(ratios) if ratios else None,
-                "score_total_correlation": correlation(ratios, scores),
+                "score_total_correlation": correlation([x for x, _ in complete_pairs], [y for _, y in complete_pairs]),
+                "scored_responses": len(scored_items),
+                "pending_responses": pending_items,
                 "answer_counts": dict(answer_counts) if ptype != "free_text" else None,
                 "score_counts": dict(score_counts),
                 "responses": len(student_items),
@@ -2019,15 +2156,21 @@ def grade_report_data(exam: dict[str, Any], gradebook: dict[str, Any], anonymize
         "exam_id": exam["exam_id"],
         "generated_at": now(),
         "anonymized": anonymize,
+        "provisional": bool(pending_count),
         "summary": {
-            "count": len(scores),
+            "count": len(students),
+            "graded_count": len(scores),
+            "pending_students": pending_count,
             "mean": statistics.mean(scores) if scores else None,
             "median": statistics.median(scores) if scores else None,
             "range": [min(scores), max(scores)] if scores else None,
         },
         "students": public_students,
         "items": items,
-        "concepts": {key: {"mean_proportion": statistics.mean(values)} for key, values in concepts.items()},
+        "concepts": {
+            key: {"mean_proportion": statistics.mean(values) if values else None}
+            for key, values in concepts.items()
+        },
     }
 
 
@@ -2051,6 +2194,8 @@ def render_grade_report_html(report: dict[str, Any]) -> str:
             if item["mean_proportion"] is None
             else f"{100 * item['mean_proportion']:.1f}% of available points earned"
         )
+        if item["pending_responses"]:
+            performance += f" · {item['pending_responses']} response(s) need review; excluded from the mean"
         label = "Rubric" if item["type"] == "free_text" else "Correct answer"
         distribution_label = "Score distribution" if item["type"] == "free_text" else "Answer distribution"
         question_cards.append(
@@ -2061,10 +2206,15 @@ def render_grade_report_html(report: dict[str, Any]) -> str:
 <div class="explanation"><strong>Explanation:</strong> {esc(item["explanation"])}</div></section>"""
         )
     summary = report["summary"]
+    notice = (
+        f"<p><strong>Provisional report:</strong> {summary['pending_students']} student(s) need review. "
+        "Total-score statistics include only fully graded students.</p>"
+        if report["provisional"] else ""
+    )
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(report["exam_id"])} post-exam report</title><style>
 :root{{--green:#4f812f;--dark:#274119;--pale:#edf5e8;--ink:#192116;--muted:#667061;--line:#dbe4d7}}*{{box-sizing:border-box}}body{{margin:0;background:#f3f5f1;color:var(--ink);font:16px/1.55 system-ui,sans-serif}}main{{max-width:920px;margin:auto;padding:44px 24px}}header,.question{{background:white;border:1px solid var(--line);border-radius:12px;padding:28px;margin-bottom:22px}}.brand-row{{display:flex;align-items:baseline;justify-content:space-between;gap:18px;padding-bottom:12px;margin-bottom:22px;border-bottom:3px solid var(--green)}}.brand{{color:var(--green);font:600 .95rem Georgia,serif;text-decoration:none}}h1,h2{{font-family:Georgia,serif}}h1{{margin:.2em 0}}h2{{font-size:1.4rem}}h3{{margin-bottom:8px}}.kicker{{color:var(--green);font-weight:750;text-transform:uppercase;font-size:.78rem;letter-spacing:.08em}}.summary{{color:var(--muted)}}.performance,.answer,.explanation{{padding:13px 15px;margin:14px 0;background:var(--pale);border-radius:7px}}.bar-row{{display:grid;grid-template-columns:minmax(120px,2fr) 5fr 35px;gap:10px;align-items:center;margin:8px 0}}.track{{height:15px;background:#e5e9e2;border-radius:20px;overflow:hidden}}.track i{{display:block;height:100%;background:var(--green)}}ol{{padding-left:24px}}footer{{margin-top:36px;padding:18px 0;border-top:1px solid var(--line);color:var(--muted);font-size:.8rem;text-align:center}}footer a{{color:var(--green)}}@media(max-width:600px){{.bar-row{{grid-template-columns:1fr 2fr 28px}}.brand-row{{display:block}}}}</style></head>
-<body><main><header><div class="brand-row"><div class="kicker">Pruefung · Post-exam report</div><a class="brand" href="https://www.expectedparrot.com/">E[&#x1f99c;] Expected Parrot</a></div><h1>{esc(report["exam_id"])}</h1><div class="summary">{summary["count"]} graded response(s) · Mean {esc(summary["mean"])} · Median {esc(summary["median"])}</div></header>{"".join(question_cards)}<footer>Generated {esc(report["generated_at"])} by <a href="https://github.com/expectedparrot/pruefung">Pruefung</a> · Expected Parrot</footer></main></body></html>"""
+<body><main><header><div class="brand-row"><div class="kicker">Pruefung · Post-exam report</div><a class="brand" href="https://www.expectedparrot.com/">E[&#x1f99c;] Expected Parrot</a></div><h1>{esc(report["exam_id"])}</h1><div class="summary">{summary["count"]} student(s) · {summary["graded_count"]} fully graded · Mean {esc(summary["mean"])} · Median {esc(summary["median"])}</div>{notice}</header>{"".join(question_cards)}<footer>Generated {esc(report["generated_at"])} by <a href="https://github.com/expectedparrot/pruefung">Pruefung</a> · Expected Parrot</footer></main></body></html>"""
 
 
 def find_student(gradebook: dict[str, Any], query: str) -> dict[str, Any]:
@@ -2108,9 +2258,14 @@ def render_student_reports_html(exam: dict[str, Any], students: list[dict[str, A
                 f"<li><strong>{esc(panel.get('model') or 'Reviewer')}:</strong> {esc(panel.get('feedback') or panel.get('justification') or 'No comment provided.')}</li>"
                 for panel in item.get("panel", [])
             )
+            if item.get("override_history"):
+                decision = item["override_history"][-1]
+                feedback += (
+                    f"<li><strong>{esc(decision['reviewer'])}:</strong> {esc(decision['reason'])}</li>"
+                )
             score = item.get("score")
             score_label = (
-                "Needs review" if score is None else f"{score:g} / {float(item.get('max_points', meta['points'])):g}"
+                "Needs review" if item_pending(item) else f"{score:g} / {float(item.get('max_points', meta['points'])):g}"
             )
             cards.append(
                 f"""<section class="question"><div class="qhead"><span>Question {number} · {esc(meta["concept"])}</span><b>{esc(score_label)}</b></div>
@@ -2121,11 +2276,68 @@ def render_student_reports_html(exam: dict[str, Any], students: list[dict[str, A
 <div class="feedback"><strong>Grader feedback</strong>{"<ul>" + feedback + "</ul>" if feedback else "<p>No grader comment was recorded.</p>"}</div></section>"""
             )
         identity = student.get("name") or student.get("email") or "Student"
+        total_label = (
+            f"Provisional: {student.get('score')} points recorded; grading incomplete"
+            if student_pending(student)
+            else f"Total {student.get('score')} / {student.get('total_points')}"
+        )
         sheets.append(
-            f"""<article class="sheet"><header><div class="brand-row"><div class="kicker">Pruefung · Detailed instructor report</div><a class="brand" href="https://www.expectedparrot.com/">E[&#x1f99c;] Expected Parrot</a></div><h1>{esc(identity)}</h1><div class="summary">{esc(student.get("email", ""))} · Total {esc(student.get("score"))} / {esc(student.get("total_points"))}</div><div class="private">Instructor copy · Contains student information</div></header>{"".join(cards)}</article>"""
+            f"""<article class="sheet"><header><div class="brand-row"><div class="kicker">Pruefung · Detailed instructor report</div><a class="brand" href="https://www.expectedparrot.com/">E[&#x1f99c;] Expected Parrot</a></div><h1>{esc(identity)}</h1><div class="summary">{esc(student.get("email", ""))} · {esc(total_label)}</div><div class="private">Instructor copy · Contains student information</div></header>{"".join(cards)}</article>"""
         )
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(exam["exam_id"])} student reports</title><style>
 :root{{--green:#4f812f;--pale:#edf5e8;--ink:#192116;--muted:#667061;--line:#dbe4d7;--gold:#e7a739}}*{{box-sizing:border-box}}body{{margin:0;background:#f3f5f1;color:var(--ink);font:15px/1.5 system-ui,sans-serif}}.sheet{{max-width:920px;margin:28px auto;padding:24px}}header,.question{{background:#fff;border:1px solid var(--line);border-radius:12px;padding:26px;margin-bottom:20px}}.brand-row,.qhead{{display:flex;justify-content:space-between;align-items:baseline;gap:16px}}.brand-row{{padding-bottom:12px;border-bottom:3px solid var(--green)}}.brand{{color:var(--green);font:600 .95rem Georgia,serif;text-decoration:none}}.kicker{{color:var(--green);font-weight:750;text-transform:uppercase;font-size:.76rem;letter-spacing:.08em}}h1,h2{{font-family:Georgia,serif}}h1{{margin:.55em 0 .15em}}h2{{font-size:1.3rem}}.summary{{color:var(--muted)}}.private{{display:inline-block;margin-top:13px;padding:5px 9px;background:#fff3d2;color:#684b13;border-radius:5px;font-size:.78rem;font-weight:700}}.qhead{{color:var(--green);font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}}.response,.rubric,.explanation,.feedback{{padding:12px 15px;margin:12px 0;background:var(--pale);border-radius:7px}}.response{{background:#f6f7f5}}p{{margin:.35em 0;white-space:pre-wrap}}ul{{margin:.5em 0;padding-left:22px}}li{{margin:.4em 0}}@media print{{body{{background:#fff}}.sheet{{max-width:none;margin:0;padding:0;break-after:page}}.sheet:last-child{{break-after:auto}}header,.question{{break-inside:avoid;box-shadow:none}}}}@media(max-width:600px){{.brand-row,.qhead{{display:block}}}}</style></head><body>{"".join(sheets)}</body></html>"""
+
+
+@cli.command("review")
+@click.argument("exam_id")
+@click.option("--student", help="Student email or name; required when recording a score.")
+@click.option("--question", help="Frozen question name or bank question ID.")
+@click.option("--score", type=float, help="Record the professor's final score.")
+@click.option("--reason", help="Professor's grading rationale.")
+@click.option("--reviewer", default="professor", show_default=True)
+@click.option("--professor-approved", is_flag=True, help="Confirm explicit professor approval of this score.")
+@human_option
+@click.pass_context
+def review_cmd(
+    ctx: click.Context, exam_id: str, student: str | None, question: str | None, score: float | None,
+    reason: str | None, reviewer: str, professor_approved: bool, human: bool,
+) -> None:
+    """Inspect private grading evidence or record an audited professor decision."""
+    root = setup(ctx, "review", human)
+    _, exam = load_exam(root, exam_id)
+    gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
+    if not gradebook:
+        raise ValidationError(f"run `pruefung grade {exam_id}` first")
+    selected = [find_student(gradebook, student)] if student else gradebook["students"]
+    targets = [(s, item) for s in selected for item in s["items"]
+               if (question in {item["question_name"], item["bank_id"]} if question else item.get("needs_review"))]
+    if score is None:
+        questions = {row["question_name"]: row["frozen"] for row in exam["questions"]}
+        emit(ctx, {"exam_id": exam_id, "items": [
+            {"student": s["email"], **item, "question": questions[item["question_name"]]}
+            for s, item in targets
+        ]})
+        return
+    if not student or not question or not reason or not reason.strip() or not professor_approved:
+        raise ValidationError("recording a score requires --student, --question, --reason, and --professor-approved")
+    if len(targets) != 1:
+        raise ValidationError("select exactly one student question")
+    _, item = targets[0]
+    score = finite_number(score, "score")
+    if not 0 <= score <= item["max_points"]:
+        raise ValidationError(f"score must be between 0 and {item['max_points']}")
+    item.setdefault("override_history", []).append({
+        "reviewer": reviewer, "reason": reason.strip(), "score": score,
+        "previous_score": item.get("score"), "previous_needs_review": item.get("needs_review", False),
+        "decided_at": now(),
+    })
+    item.update(score=score, override=True, needs_review=False)
+    gb_path, csv_path = write_gradebook(root, exam_id, gradebook)
+    output = Path.cwd() / f"{exam_id}-report.html"
+    output.write_text(render_grade_report_html(grade_report_data(exam, gradebook, True)), encoding="utf-8")
+    emit(ctx, {"exam_id": exam_id, "question": item["question_name"], "score": score,
+               "gradebook": str(gb_path), "csv": str(csv_path), "html": str(output),
+               "next_commands": [f"pruefung student-reports {exam_id}"]})
 
 
 @cli.command("grade-report")
@@ -2163,7 +2375,9 @@ def grade_report_cmd(
         html_path.write_text(rendered, encoding="utf-8")
         report["html"] = str(html_path)
     if human:
-        click.echo(f"{exam_id}: {report['summary']['count']} graded response(s)")
+        click.echo(f"{exam_id}: {report['summary']['graded_count']} fully graded student(s)")
+        if report["provisional"]:
+            click.echo("Provisional report: unresolved grades are excluded from score statistics.")
         click.echo(f"Mean: {report['summary']['mean']}  Median: {report['summary']['median']}")
         for item in report["items"]:
             click.echo(
@@ -2227,7 +2441,8 @@ def post_exam_report_cmd(ctx: click.Context, exam_id: str, output: Path | None, 
     output.parent.mkdir(parents=True, exist_ok=True)
     report = grade_report_data(exam, gradebook, anonymize=True)
     output.write_text(render_grade_report_html(report), encoding="utf-8")
-    emit(ctx, {"exam_id": exam_id, "html": str(output), "questions": len(report["items"])})
+    emit(ctx, {"exam_id": exam_id, "html": str(output), "questions": len(report["items"]),
+               "provisional": report["provisional"], "pending_students": report["summary"]["pending_students"]})
 
 
 @cli.command("status")
@@ -2270,12 +2485,23 @@ def grade_make_cmd(ctx: click.Context, exam_id: str, models: str, force: bool, h
     root = setup(ctx, "grade make", human)
     _, exam = load_exam(root, exam_id)
     responses = sync_responses(state(root) / "exams" / exam_id, exam)
+    gradebook = read_json(state(root) / "gradebooks" / f"{exam_id}.gradebook.json")
+    if not gradebook:
+        raise ValidationError(f"run `pruefung grade {exam_id}` first")
+    ungraded = {
+        (student["email"], item["question_name"]): item
+        for student in gradebook["students"] for item in student["items"]
+        if item.get("score") is None and not item.get("override") and not item.get("panel")
+    }
+    responses, _, _ = select_responses(exam, responses)
     scenarios, hashes, response_inputs = [], {}, {}
     for response in responses:
         answer_id = response.get("email") or response.get("identifier", "")
         for row in exam.get("questions", []):
             q = row["frozen"]
-            if q["meta"]["ptype"] == "free_text":
+            if q["meta"]["ptype"] == "free_text" and (answer_id, row["question_name"]) in ungraded:
+                if response_answer(response, row["question_name"]) != ungraded[(answer_id, row["question_name"])]["answer"]:
+                    raise ConflictError(f"responses changed; run `pruefung grade {exam_id}` before preparing grading")
                 aid = f"{answer_id}:{row['question_name']}"
                 object_id = f"response:{canonical_hash(aid)[:20]}"
                 hashes[object_id] = canonical_hash(
@@ -2352,11 +2578,27 @@ def grade_ingest_cmd(ctx: click.Context, exam_id: str, task_ref: str, human: boo
         raise ValidationError("rubric result payload requires a rows array")
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
+        if not isinstance(row, dict):
+            raise ValidationError("each rubric result must be an object")
         scenario = row.get("input", row.get("scenario", {}))
         answer_id = scenario.get("answer_id") if isinstance(scenario, dict) else row.get("answer_id")
         if not answer_id or row.get("score") is None:
             raise ValidationError("every rubric result row requires answer_id and score")
         grouped[str(answer_id)].append(row)
+    expected_answers = {
+        f"{value['email']}:{value['question_name']}" for value in task.get("response_inputs", {}).values()
+    }
+    if not expected_answers or set(grouped) != expected_answers:
+        raise ValidationError("rubric results must cover exactly the answers in the task")
+    _, exam = load_exam(root, exam_id)
+    maxima = {row["question_name"]: row["frozen"]["meta"]["points"] for row in exam["questions"]}
+    for answer_id, verdicts in grouped.items():
+        validate_panel_models([row.get("model") for row in verdicts], task["models"])
+        maximum = maxima[answer_id.rsplit(":", 1)[1]]
+        for row in verdicts:
+            score = finite_number(row["score"], "rubric score")
+            if not 0 <= score <= maximum:
+                raise ValidationError(f"rubric score outside 0-{maximum} for {answer_id}")
     gb_path = state(root) / "gradebooks" / f"{exam_id}.gradebook.json"
     gradebook = read_json(gb_path)
     if not gradebook:
@@ -2366,7 +2608,7 @@ def grade_ingest_cmd(ctx: click.Context, exam_id: str, task_ref: str, human: boo
         for item in student["items"]:
             answer_id = f"{student['email']}:{item['question_name']}"
             verdicts = grouped.get(answer_id)
-            if not verdicts or item.get("score") is not None or item.get("override"):
+            if not verdicts or item.get("score") is not None or item.get("override") or item.get("panel"):
                 continue
             scores = [float(row["score"]) for row in verdicts]
             if any(score < 0 or score > float(item["max_points"]) for score in scores):
@@ -2393,14 +2635,7 @@ def grade_ingest_cmd(ctx: click.Context, exam_id: str, task_ref: str, human: boo
                 item["needs_review"] = True
             updated.append(answer_id)
         student["score"] = sum(item.get("score") or 0 for item in student["items"])
-    write_json(gb_path, gradebook)
-    csv_path = state(root) / "gradebooks" / f"{exam_id}.gradebook.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["email", "name", "score", "total_points"])
-        writer.writerows(
-            [[row["email"], row["name"], row["score"], row["total_points"]] for row in gradebook["students"]]
-        )
+    write_gradebook(root, exam_id, gradebook)
     task.update(status="ingested", ingested_at=now())
     write_json(task_path, task)
     emit(ctx, {"task_id": task["task_id"], "updated": updated})

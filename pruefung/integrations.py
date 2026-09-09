@@ -193,11 +193,14 @@ def normalize_answer(value: Any, ptype: str, options: list[str]) -> Any:
         if isinstance(value, int):
             return value
         text = str(value).strip()
+        # Human responses contain option labels, which may themselves be numbers.
+        if text in options:
+            return options.index(text)
+        for index, option in enumerate(options):
+            if text.lower() == option.lower():
+                return index
         if text.isdigit():
             return int(text)
-        for index, option in enumerate(options):
-            if text == option or text.lower() == option.lower():
-                return index
         return value
     if ptype == "checkbox":
         values = value if isinstance(value, list) else [value]
